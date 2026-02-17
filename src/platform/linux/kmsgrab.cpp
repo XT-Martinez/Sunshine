@@ -692,6 +692,12 @@ namespace platf {
 
             kms::print(plane.get(), fb.get(), crtc.get());
 
+            if (crtc->mode.clock && crtc->mode.htotal && crtc->mode.vtotal) {
+              vblank_period = std::chrono::nanoseconds(
+                (int64_t)(1e9 * crtc->mode.htotal * crtc->mode.vtotal / ((double) crtc->mode.clock * 1000.0)));
+            } else {
+              vblank_period = delay;
+            }
             img_width = fb->width;
             img_height = fb->height;
             img_offset_x = crtc->x;
@@ -1123,6 +1129,7 @@ namespace platf {
       mem_type_e mem_type;
 
       std::chrono::nanoseconds delay;
+      std::chrono::nanoseconds vblank_period;  // display refresh period from CRTC mode
 
       int img_width, img_height;
       int img_offset_x, img_offset_y;
@@ -1191,18 +1198,13 @@ namespace platf {
             vbl.request.type = (drmVBlankSeqType)(DRM_VBLANK_RELATIVE | (crtc_index << DRM_VBLANK_HIGH_CRTC_SHIFT));
             vbl.request.sequence = 1;
             if (drmWaitVBlank(card.fd.el, &vbl) == 0) {
-              // DRM vblank time is CLOCK_MONOTONIC, same as steady_clock on Linux
               auto vblank_time = std::chrono::seconds(vbl.reply.tval_sec) + std::chrono::microseconds(vbl.reply.tval_usec);
               vblank_timestamp = std::chrono::steady_clock::time_point(std::chrono::duration_cast<std::chrono::steady_clock::duration>(vblank_time));
               
-              // Skip frame if display Hz > client FPS (e.g., 120Hz display, 60fps stream)
-              if (*vblank_timestamp < next_frame) {
+              if (*vblank_timestamp < next_frame && next_frame - *vblank_timestamp > vblank_period / 2) {
                 continue;
               }
-              next_frame += delay;
-              if (next_frame < *vblank_timestamp) {
-                next_frame = *vblank_timestamp + delay;
-              }
+              next_frame = *vblank_timestamp + delay;
             } else {
               // Vblank wait failed, fall back to timer-based delay
               auto now = std::chrono::steady_clock::now();
@@ -1454,14 +1456,10 @@ namespace platf {
               auto vblank_time = std::chrono::seconds(vbl.reply.tval_sec) + std::chrono::microseconds(vbl.reply.tval_usec);
               vblank_timestamp = std::chrono::steady_clock::time_point(std::chrono::duration_cast<std::chrono::steady_clock::duration>(vblank_time));
               
-              // Skip frame if display Hz > client FPS (e.g., 120Hz display, 60fps stream)
-              if (*vblank_timestamp < next_frame) {
+              if (*vblank_timestamp < next_frame && next_frame - *vblank_timestamp > vblank_period / 2) {
                 continue;
               }
-              next_frame += delay;
-              if (next_frame < *vblank_timestamp) {
-                next_frame = *vblank_timestamp + delay;
-              }
+              next_frame = *vblank_timestamp + delay;
             } else {
               // Vblank wait failed, fall back to timer-based delay
               auto now = std::chrono::steady_clock::now();
