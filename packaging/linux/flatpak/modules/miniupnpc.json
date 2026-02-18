@@ -5,6 +5,7 @@
   "subdir": "miniupnpc",
   "config-opts": [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+    "-DCMAKE_INSTALL_LIBDIR=lib",
     "-DUPNPC_BUILD_STATIC=OFF",
     "-DUPNPC_BUILD_SHARED=ON",
     "-DUPNPC_BUILD_TESTS=OFF",
@@ -26,10 +27,6 @@
   ],
   "cleanup": [
     "/share/man",
-    "/lib/pkgconfig",
-    "/lib/libminiupnpc.so",
-    "/lib/cmake",
-    "/include",
     "/bin/external-ip.sh"
   ]
 }

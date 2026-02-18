@@ -1,0 +1,23 @@
+FROM fedora:41
+
+RUN printf '%s\n' \
+  'fastestmirror=True' \
+  'max_parallel_downloads=10' \
+  'defaultyes=True' >> /etc/dnf/dnf.conf
+
+RUN dnf -y upgrade --refresh && dnf -y install \
+  appstream \
+  ca-certificates \
+  cmake \
+  dbus-daemon \
+  flatpak \
+  flatpak-builder \
+  gcc \
+  gcc-c++ \
+  git \
+  npm \
+  python3 \
+  python3-pip \
+  && dnf clean all
+
+WORKDIR /workspace

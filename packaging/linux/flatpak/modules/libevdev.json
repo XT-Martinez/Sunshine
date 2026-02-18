@@ -2,6 +2,7 @@
   "name": "libevdev",
   "buildsystem": "meson",
   "config-opts": [
+    "--libdir=lib",
     "-Ddocumentation=disabled",
     "-Dtests=disabled"
   ],
@@ -21,8 +22,6 @@
   ],
   "cleanup": [
     "/bin",
-    "/include",
-    "/lib/pkgconfig",
     "/share"
   ]
 }
