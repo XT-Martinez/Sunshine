@@ -12,6 +12,14 @@ on:
       release_version:
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      release_commit:
+        required: true
+        type: string
+      release_version:
+        required: true
+        type: string
 
 jobs:
   build_linux_flatpak:
