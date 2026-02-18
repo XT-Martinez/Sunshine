@@ -1,6 +1,11 @@
 {
   "name": "xvfb",
   "buildsystem": "meson",
+  "build-options": {
+    "env": {
+      "PKG_CONFIG_PATH": "/app/lib/pkgconfig:/app/lib/x86_64-linux-gnu/pkgconfig:/app/lib/aarch64-linux-gnu/pkgconfig:/app/share/pkgconfig"
+    }
+  },
   "config-opts": [
     "-Dxorg=true",
     "-Dxvfb=true",
@@ -31,6 +36,10 @@
     {
       "name": "libxcvt",
       "buildsystem": "meson",
+      "config-opts": [
+        "--prefix=/app",
+        "--libdir=/app/lib"
+      ],
       "sources": [
         {
           "type": "git",
