@@ -53,8 +53,7 @@ jobs:
       MATRIX_ARCH: ${{ matrix.arch }}
       NODE_VERSION: "20"
       PLATFORM_VERSION: "24.08"
-    runs-on: ${{ inputs.use_self_hosted && fromJSON(inputs.self_hosted_runner_labels) || matrix.runner }}
-    if: ${{ !inputs.use_self_hosted || matrix.arch == 'x86_64' }}
+    runs-on: ${{ matrix.arch == 'x86_64' && inputs.use_self_hosted && fromJSON(inputs.self_hosted_runner_labels) || matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
