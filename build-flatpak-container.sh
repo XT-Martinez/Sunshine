@@ -8,6 +8,7 @@ ENABLE_CUDA="${ENABLE_CUDA:-0}"
 INSTALL_SYSTEM_DEPS="${INSTALL_SYSTEM_DEPS:-1}"
 SKIP_APPSTREAM_COMPOSE="${SKIP_APPSTREAM_COMPOSE:-1}"
 BUILDER_BACKEND="${BUILDER_BACKEND:-host}"
+FFMPEG_TARBALL_OVERRIDE="${FFMPEG_TARBALL_OVERRIDE:-}"
 APP_ID="dev.lizardbyte.app.Sunshine"
 
 ensure_runtime_dir() {
@@ -82,6 +83,64 @@ RELEASE_VERSION="${RELEASE_VERSION:-$(git rev-parse --short=8 HEAD)}"
 BRANCH="${BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 
 validate_clone_url "${CLONE_URL}"
+
+prepare_ffmpeg_override() {
+  if [[ -z "${FFMPEG_TARBALL_OVERRIDE}" ]]; then
+    return
+  fi
+
+  if [[ ! -f "${FFMPEG_TARBALL_OVERRIDE}" ]]; then
+    echo "FFMPEG_TARBALL_OVERRIDE file not found: ${FFMPEG_TARBALL_OVERRIDE}"
+    exit 1
+  fi
+
+  python3 - <<'PY'
+from pathlib import Path
+import json
+import os
+import shutil
+import zipfile
+
+src = Path(os.environ["FFMPEG_TARBALL_OVERRIDE"])
+arch = os.environ["ARCH"]
+build_dir = Path("build")
+repo_tar = Path("ffmpeg.tar.gz")
+build_tar = build_dir / "ffmpeg.tar.gz"
+modules_tar = build_dir / "modules" / "ffmpeg.tar.gz"
+module_file = build_dir / "modules" / "ffmpeg.json"
+
+if src.suffix.lower() == ".zip":
+    with zipfile.ZipFile(src, "r") as zf:
+        names = zf.namelist()
+        preferred = [
+            n for n in names
+            if n.endswith(f"Linux-{arch}-ffmpeg.tar.gz")
+        ]
+        fallback = [n for n in names if n.endswith("ffmpeg.tar.gz")]
+        candidates = preferred or fallback
+        if not candidates:
+            raise SystemExit(f"No ffmpeg tarball found inside zip: {src}")
+        selected = candidates[0]
+        with zf.open(selected, "r") as rf, repo_tar.open("wb") as wf:
+            shutil.copyfileobj(rf, wf)
+else:
+    shutil.copy2(src, repo_tar)
+
+shutil.copy2(repo_tar, build_tar)
+modules_tar.parent.mkdir(parents=True, exist_ok=True)
+shutil.copy2(repo_tar, modules_tar)
+
+if not module_file.exists():
+    raise SystemExit(f"Module file not found: {module_file}")
+
+data = json.loads(module_file.read_text(encoding="utf-8"))
+data["sources"] = [{"type": "file", "path": "../ffmpeg.tar.gz"}]
+module_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+print(f"Using overridden FFmpeg tarball: {repo_tar}")
+print(f"Also copied to: {build_tar} and {modules_tar}")
+PY
+}
 
 if [[ "${ARCH}" != "x86_64" && "${ARCH}" != "aarch64" ]]; then
   echo "Unsupported ARCH='${ARCH}'. Use x86_64 or aarch64."
@@ -158,12 +217,15 @@ export BRANCH="${BRANCH}"
 export BUILD_VERSION="${RELEASE_VERSION}"
 export CLONE_URL="${CLONE_URL}"
 export COMMIT="${RELEASE_COMMIT}"
+export ARCH
 
 cmake -DGITHUB_CLONE_URL="${CLONE_URL}" \
   -B build \
   -S . \
   -DSUNSHINE_CONFIGURE_FLATPAK_MAN=ON \
   -DSUNSHINE_CONFIGURE_ONLY=ON
+
+prepare_ffmpeg_override
 
 if [[ "${ENABLE_CUDA}" != "1" ]]; then
   python3 - <<'PY'
