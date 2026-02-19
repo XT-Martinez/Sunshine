@@ -42,6 +42,9 @@
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "vaapi.h"
+#ifdef SUNSHINE_BUILD_PIPEWIRE
+#include "pipewire.h"
+#endif
 
 #ifdef __GNUC__
   #define SUNSHINE_GNUC_EXTENSION __extension__
@@ -880,6 +883,9 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_CUDA
       NVFBC,  ///< NvFBC
 #endif
+#ifdef SUNSHINE_BUILD_PIPEWIRE
+      PIPEWIRE,  ///< PipeWire portal
+#endif
 #ifdef SUNSHINE_BUILD_WAYLAND
       WAYLAND,  ///< Wayland
 #endif
@@ -950,6 +956,11 @@ namespace platf {
       return nvfbc_display_names();
     }
 #endif
+#ifdef SUNSHINE_BUILD_PIPEWIRE
+    if (sources[source::PIPEWIRE]) {
+      return pipewire::display_names();
+    }
+#endif
 #ifdef SUNSHINE_BUILD_WAYLAND
     if (sources[source::WAYLAND]) {
       return wl_display_names();
@@ -987,6 +998,12 @@ namespace platf {
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
       BOOST_LOG(info) << "Screencasting with NvFBC"sv;
       return nvfbc_display(hwdevice_type, display_name, config);
+    }
+#endif
+#ifdef SUNSHINE_BUILD_PIPEWIRE
+    if (sources[source::PIPEWIRE]) {
+      BOOST_LOG(info) << "Screencasting with PipeWire portal"sv;
+      return pipewire::display(hwdevice_type, display_name, config);
     }
 #endif
 #ifdef SUNSHINE_BUILD_WAYLAND
@@ -1054,6 +1071,13 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_DRM
     if (((config::video.capture.empty() && sources.none()) || config::video.capture == "kms") && verify_kms()) {
       sources[source::KMS] = true;
+    }
+#endif
+#ifdef SUNSHINE_BUILD_PIPEWIRE
+    if ((config::video.capture.empty() && sources.none()) || config::video.capture == "pipewire") {
+      if (pipewire::verify()) {
+        sources[source::PIPEWIRE] = true;
+      }
     }
 #endif
 #ifdef SUNSHINE_BUILD_X11
