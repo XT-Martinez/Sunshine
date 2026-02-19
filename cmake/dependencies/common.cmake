@@ -29,6 +29,15 @@ include_directories(SYSTEM ${MINIUPNP_INCLUDE_DIRS})
 # ffmpeg pre-compiled binaries
 option(USE_SYSTEM_FFMPEG "Use system FFmpeg libraries (with bundled CBS)" ON)
 
+if(WIN32)
+    set(FFMPEG_PLATFORM_LIBRARIES mfplat ole32 strmiids mfuuid vpl)
+elseif(FREEBSD)
+    # numa is not available on FreeBSD
+    set(FFMPEG_PLATFORM_LIBRARIES va va-drm va-x11 X11)
+elseif(UNIX AND NOT APPLE)
+    set(FFMPEG_PLATFORM_LIBRARIES numa va va-drm va-x11 X11)
+endif()
+
 if(USE_SYSTEM_FFMPEG)
     # Use system FFmpeg shared libs + bundled CBS headers/lib
     pkg_check_modules(FFMPEG_SYSTEM REQUIRED IMPORTED_TARGET
@@ -49,14 +58,6 @@ if(USE_SYSTEM_FFMPEG)
     )
     message(STATUS "Using system FFmpeg with bundled CBS")
 elseif(NOT DEFINED FFMPEG_PREPARED_BINARIES)
-    if(WIN32)
-        set(FFMPEG_PLATFORM_LIBRARIES mfplat ole32 strmiids mfuuid vpl)
-    elseif(FREEBSD)
-        # numa is not available on FreeBSD
-        set(FFMPEG_PLATFORM_LIBRARIES va va-drm va-x11 X11)
-    elseif(UNIX AND NOT APPLE)
-        set(FFMPEG_PLATFORM_LIBRARIES numa va va-drm va-x11 X11)
-    endif()
     set(FFMPEG_PREPARED_BINARIES
             "${CMAKE_SOURCE_DIR}/third-party/build-deps/dist/${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
 
@@ -84,11 +85,23 @@ elseif(NOT DEFINED FFMPEG_PREPARED_BINARIES)
             ${HDR10_PLUS_LIBRARY}
             ${FFMPEG_PLATFORM_LIBRARIES})
 else()
+    set(FFMPEG_OPTIONAL_LIBRARIES)
+    foreach(optional_lib IN ITEMS libSvtAv1Enc.a libx264.a libx265.a)
+        if(EXISTS "${FFMPEG_PREPARED_BINARIES}/lib/${optional_lib}")
+            list(APPEND FFMPEG_OPTIONAL_LIBRARIES "${FFMPEG_PREPARED_BINARIES}/lib/${optional_lib}")
+        endif()
+    endforeach()
+    if(EXISTS "${FFMPEG_PREPARED_BINARIES}/lib/libhdr10plus.a")
+        set(HDR10_PLUS_LIBRARY "${FFMPEG_PREPARED_BINARIES}/lib/libhdr10plus.a")
+    endif()
+
     set(FFMPEG_LIBRARIES
         "${FFMPEG_PREPARED_BINARIES}/lib/libavcodec.a"
         "${FFMPEG_PREPARED_BINARIES}/lib/libswscale.a"
         "${FFMPEG_PREPARED_BINARIES}/lib/libavutil.a"
         "${FFMPEG_PREPARED_BINARIES}/lib/libcbs.a"
+        ${FFMPEG_OPTIONAL_LIBRARIES}
+        ${HDR10_PLUS_LIBRARY}
         ${FFMPEG_PLATFORM_LIBRARIES})
 endif()
 
