@@ -138,6 +138,11 @@ namespace portal {
     struct pw_buffer *current_buffer;
     uint64_t drm_format;
     std::shared_ptr<shared_state_t> shared;
+    std::mutex frame_mutex;
+    std::condition_variable frame_cv;
+    std::vector<uint8_t> software_buffer;
+    size_t local_stride = 0;
+    bool frame_ready = false;
   };
 
   struct dmabuf_format_info_t {
@@ -691,6 +696,14 @@ namespace portal {
       pw_thread_loop_destroy(loop);
     }
 
+    std::mutex &frame_mutex() {
+      return stream_data.frame_mutex;
+    }
+
+    std::condition_variable &frame_cv() {
+      return stream_data.frame_cv;
+    }
+
     void init(int stream_fd, int stream_node, std::shared_ptr<shared_state_t> shared_state) {
       fd = stream_fd;
       node = stream_node;
@@ -712,9 +725,18 @@ namespace portal {
     void cleanup_stream() {
       if (loop && stream_data.stream) {
         pw_thread_loop_lock(loop);
+
+        // 1. Lock the frame mutex to stop fill_img
+        {
+          std::scoped_lock lock(stream_data.frame_mutex);
+          stream_data.frame_ready = false;
+          stream_data.current_buffer = nullptr;
+        }
+
         pw_stream_disconnect(stream_data.stream);
         pw_stream_destroy(stream_data.stream);
         stream_data.stream = nullptr;
+
         pw_thread_loop_unlock(loop);
       }
       session_cache_t::instance().invalidate();
@@ -767,12 +789,33 @@ namespace portal {
     void fill_img(platf::img_t *img) {
       pw_thread_loop_lock(loop);
 
-      if (stream_data.current_buffer) {
-        struct spa_buffer *buf;
-        buf = stream_data.current_buffer->buffer;
+      // 1. Lock the frame mutex immediately to protect against on_process reallocations
+      std::scoped_lock lock(stream_data.frame_mutex);
+
+      // Check if the stream is marked dead by modesetting logic
+      if (stream_data.shared && stream_data.shared->stream_dead.load()) {
+        img->data = nullptr;
+        pw_thread_loop_unlock(loop);
+        return;
+      }
+
+      // 2. Validate we have a buffer and a signal that it's "new"
+      if (stream_data.current_buffer && stream_data.frame_ready) {
+        struct spa_buffer *buf = stream_data.current_buffer->buffer;
+
         if (buf->datas[0].chunk->size != 0) {
           const auto img_descriptor = static_cast<egl::img_descriptor_t *>(img);
           img_descriptor->frame_timestamp = std::chrono::steady_clock::now();
+
+          // Passthrough PipeWire metadata
+          struct spa_meta_header *h = static_cast<struct spa_meta_header *>(
+            spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof(*h))
+          );
+          if (h) {
+            img_descriptor->seq = h->seq;
+            img_descriptor->pts = h->pts;
+          }
+
           if (buf->datas[0].type == SPA_DATA_DmaBuf) {
             img_descriptor->sd.width = stream_data.format.info.raw.size.width;
             img_descriptor->sd.height = stream_data.format.info.raw.size.height;
@@ -785,10 +828,17 @@ namespace portal {
               img_descriptor->sd.offsets[i] = buf->datas[i].chunk->offset;
             }
           } else {
-            img->data = static_cast<std::uint8_t *>(buf->datas[0].data);
-            img->row_pitch = buf->datas[0].chunk->stride;
+            img->data = stream_data.software_buffer.data();
+            img->row_pitch = stream_data.local_stride;
+
+            // Reset state so we don't process the same copy twice
+            stream_data.frame_ready = false;
+            stream_data.current_buffer = nullptr;
           }
         }
+      } else {
+        // No new frame ready, or buffer was cleared during reinit
+        img->data = nullptr;
       }
 
       pw_thread_loop_unlock(loop);
@@ -869,15 +919,15 @@ namespace portal {
         case PW_STREAM_STATE_PAUSED:
           // Trigger a reinit to identify if changes occurred
           if (d->shared && old == PW_STREAM_STATE_STREAMING) {
+            std::scoped_lock lock(d->frame_mutex);
+            d->frame_ready = false;
+            d->current_buffer = nullptr;
             d->shared->stream_dead.store(true, std::memory_order_relaxed);
           }
           break;
-        case PW_STREAM_STATE_CONNECTING:
-        case PW_STREAM_STATE_STREAMING:
         default:
           break;
       }
-      return;
     }
 
     static void on_process(void *user_data) {
@@ -900,10 +950,35 @@ namespace portal {
         return;
       }
 
-      if (d->current_buffer) {
-        pw_stream_queue_buffer(d->stream, d->current_buffer);
+      bool is_dmabuf = (b->buffer->datas[0].type == SPA_DATA_DmaBuf);
+
+      if (is_dmabuf) {
+        std::scoped_lock lock(d->frame_mutex);
+        if (d->current_buffer) {
+          pw_stream_queue_buffer(d->stream, d->current_buffer);
+        }
+        d->current_buffer = b;
+        d->frame_ready = true;
+      } else if (b->buffer->datas[0].data != nullptr) {
+        size_t size = b->buffer->datas[0].chunk->size;
+
+        std::scoped_lock lock(d->frame_mutex);
+
+        if (d->software_buffer.size() < size) {
+          BOOST_LOG(info) << "Portal: resizing software buffer for mode change: "sv << size;
+          d->software_buffer.resize(size);
+        }
+
+        std::memcpy(d->software_buffer.data(), b->buffer->datas[0].data, size);
+
+        d->local_stride = b->buffer->datas[0].chunk->stride;
+        d->frame_ready = true;
+        d->current_buffer = b;
+
+        // Release the PipeWire buffer immediately after copy
+        pw_stream_queue_buffer(d->stream, b);
       }
-      d->current_buffer = b;
+      d->frame_cv.notify_one();
     }
 
     static void on_param_changed(void *user_data, uint32_t id, const struct spa_pod *param) {
@@ -966,14 +1041,18 @@ namespace portal {
         buffer_types |= 1 << SPA_DATA_MemPtr;
       }
 
-      // Ack the buffer type
+      // Ack the buffer type and metadata
       std::array<uint8_t, SPA_POD_BUFFER_SIZE> buffer;
-      std::array<const struct spa_pod *, 1> params;
+      std::array<const struct spa_pod *, 2> params;
       int n_params = 0;
       struct spa_pod_builder pod_builder = SPA_POD_BUILDER_INIT(buffer.data(), buffer.size());
       auto buffer_param = static_cast<const struct spa_pod *>(spa_pod_builder_add_object(&pod_builder, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers, SPA_PARAM_BUFFERS_dataType, SPA_POD_Int(buffer_types)));
       params[n_params] = buffer_param;
       n_params++;
+      auto meta_param = static_cast<const struct spa_pod *>(spa_pod_builder_add_object(&pod_builder, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta, SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header), SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_header))));
+      params[n_params] = meta_param;
+      n_params++;
+
       pw_stream_update_params(d->stream, params.data(), n_params);
     }
 
@@ -988,8 +1067,18 @@ namespace portal {
   class portal_t: public platf::display_t {
   public:
     int init(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
+      // calculate frame interval we should capture at
       framerate = config.framerate;
-      delay = std::chrono::nanoseconds {1s} / framerate;
+      if (config.framerateX100 > 0) {
+        AVRational fps_strict = ::video::framerateX100_to_rational(config.framerateX100);
+        delay = std::chrono::nanoseconds(
+          (static_cast<int64_t>(fps_strict.den) * 1'000'000'000LL) / fps_strict.num
+        );
+        BOOST_LOG(info) << "Requested frame rate [" << fps_strict.num << "/" << fps_strict.den << ", approx. " << av_q2d(fps_strict) << " fps]";
+      } else {
+        delay = std::chrono::nanoseconds {1s} / framerate;
+        BOOST_LOG(info) << "Requested frame rate [" << framerate << "fps]";
+      }
       mem_type = hwdevice_type;
 
       if (get_dmabuf_modifiers() < 0) {
@@ -1051,23 +1140,56 @@ namespace portal {
 
     platf::capture_e snapshot(const pull_free_image_cb_t &pull_free_image_cb, std::shared_ptr<platf::img_t> &img_out, std::chrono::milliseconds timeout, bool show_cursor) {
       // FIXME: show_cursor is ignored
-      if (!pull_free_image_cb(img_out)) {
-        return platf::capture_e::interrupted;
+      auto start_time = std::chrono::steady_clock::now();
+      auto end_time = start_time;
+
+      while (true) {
+        if (!pull_free_image_cb(img_out)) {
+          return platf::capture_e::interrupted;
+        }
+
+        const auto img_egl = static_cast<egl::img_descriptor_t *>(img_out.get());
+        img_egl->reset();
+        pipewire.fill_img(img_egl);
+
+        // Check if we got valid data (either DMA-BUF fd or memory pointer)
+        if (img_egl->sd.fds[0] < 0 && img_egl->data == nullptr) {
+          // No buffer available yet from pipewire
+          goto retry_logic;
+        }
+
+        // Duplicate detection: PipeWire seq increments on each new frame,
+        // pts advances with each buffer update. Both must advance to accept frame.
+        if (img_egl->seq.has_value() && img_egl->pts.has_value()) {
+          if (last_pts.has_value() && last_seq.has_value() &&
+            img_egl->pts.value() == last_pts.value() &&
+            img_egl->seq.value() == last_seq.value()) {
+            goto retry_logic;
+          }
+        }
+
+        // Frame found; check deadline
+        end_time = std::chrono::steady_clock::now();
+        if (end_time - start_time > timeout) {
+          return platf::capture_e::timeout;
+        } else {
+          if (img_egl->seq.has_value() && img_egl->pts.has_value()) {
+            last_seq = img_egl->seq.value();
+            last_pts = img_egl->pts.value();
+          }
+          img_egl->sequence = ++sequence;
+          return platf::capture_e::ok;
+        }
+
+      retry_logic:
+        end_time = std::chrono::steady_clock::now();
+        if (end_time - start_time >= timeout) {
+          return platf::capture_e::timeout;
+        }
+
+        std::unique_lock lock(pipewire.frame_mutex());
+        pipewire.frame_cv().wait_until(lock, start_time + timeout);
       }
-
-      const auto img_egl = static_cast<egl::img_descriptor_t *>(img_out.get());
-      img_egl->reset();
-      pipewire.fill_img(img_egl);
-
-      // Check if we got valid data (either DMA-BUF fd or memory pointer)
-      if (img_egl->sd.fds[0] < 0 && img_egl->data == nullptr) {
-        // No buffer available yet from pipewire
-        return platf::capture_e::timeout;
-      }
-
-      img_egl->sequence = ++sequence;
-
-      return platf::capture_e::ok;
     }
 
     std::shared_ptr<platf::img_t> alloc_img() override {
@@ -1115,17 +1237,16 @@ namespace portal {
           }
         }
 
+        // Advance to (or catch up with) next delay interval
         auto now = std::chrono::steady_clock::now();
-
-        if (next_frame > now) {
-          std::this_thread::sleep_for(next_frame - now);
-          sleep_overshoot_logger.first_point(next_frame);
-          sleep_overshoot_logger.second_point_now_and_log();
+        while (next_frame < now) {
+          next_frame += delay;
         }
 
-        next_frame += delay;
-        if (next_frame < now) {  // some major slowdown happened; we couldn't keep up
-          next_frame = now + delay;
+        if (next_frame > now) {
+          std::this_thread::sleep_until(next_frame);
+          sleep_overshoot_logger.first_point(next_frame);
+          sleep_overshoot_logger.second_point_now_and_log();
         }
 
         std::shared_ptr<platf::img_t> img_out;
@@ -1289,6 +1410,8 @@ namespace portal {
     int n_dmabuf_infos;
     bool display_is_nvidia = false;  // Track if display GPU is NVIDIA
     std::chrono::nanoseconds delay;
+    std::optional<std::uint64_t> last_pts {};
+    std::optional<std::uint64_t> last_seq {};
     std::uint64_t sequence {};
     uint32_t framerate;
     static inline std::atomic<uint32_t> previous_height {0};
