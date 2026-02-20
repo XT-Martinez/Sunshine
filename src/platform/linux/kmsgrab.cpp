@@ -1580,11 +1580,7 @@ namespace platf {
   }  // namespace kms
 
   std::shared_ptr<display_t> kms_display(mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
-    if (hwdevice_type == mem_type_e::vaapi ||
-#ifdef SUNSHINE_BUILD_VULKAN
-        hwdevice_type == mem_type_e::vulkan ||
-#endif
-        hwdevice_type == mem_type_e::cuda) {
+    if (hwdevice_type == mem_type_e::vaapi || hwdevice_type == mem_type_e::cuda || hwdevice_type == mem_type_e::vulkan) {
       auto disp = std::make_shared<kms::display_vram_t>(hwdevice_type);
 
       if (!disp->init(display_name, config)) {

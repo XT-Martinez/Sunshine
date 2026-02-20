@@ -17,6 +17,7 @@ extern "C" {
 
 #include "vulkan_encode.h"
 #include "graphics.h"
+#include "src/config.h"
 #include "src/logging.h"
 #include "misc.h"
 
@@ -28,10 +29,12 @@ namespace vk {
   public:
     ~vk_vram_t() = default;
 
-    int init(int in_width, int in_height, file_t &&render_device) {
+    int init(int in_width, int in_height, file_t &&render_device, int in_offset_x = 0, int in_offset_y = 0) {
       file = std::move(render_device);
       width = in_width;
       height = in_height;
+      offset_x = in_offset_x;
+      offset_y = in_offset_y;
 
       if (!gbm::create_device) {
         BOOST_LOG(warning) << "libgbm not initialized"sv;
@@ -79,7 +82,9 @@ namespace vk {
       return 0;
     }
 
-    void apply_colorspace() override {}
+    void apply_colorspace() override {
+      sws.apply_colorspace(colorspace);
+    }
     
     void init_hwframes(AVHWFramesContext *frames) override {
       frames->initial_pool_size = 4;
@@ -109,19 +114,8 @@ namespace vk {
         sequence = descriptor.sequence;
         rgb = egl::rgb_t {};
         auto rgb_opt = egl::import_source(display.get(), descriptor.sd);
-        if (!rgb_opt) {
-          // EGL import failed - use blank frame to avoid crash
-          BOOST_LOG(warning) << "RGB import failed, using blank frame"sv;
-          rgb = egl::create_blank(img);
-        } else {
-          rgb = std::move(*rgb_opt);
-        }
-      }
-
-      // Ensure rgb texture is valid before proceeding
-      if (!rgb->tex[0]) {
-        BOOST_LOG(error) << "No valid RGB texture available"sv;
-        return -1;
+        if (!rgb_opt) return -1;
+        rgb = std::move(*rgb_opt);
       }
 
       // Setup Vulkan→EGL zero-copy interop if needed
@@ -134,7 +128,7 @@ namespace vk {
       }
 
       // Render RGB→NV12 directly into Vulkan memory via EGL (zero-copy)
-      sws.load_vram(descriptor, 0, 0, rgb->tex[0]);
+      sws.load_vram(descriptor, offset_x, offset_y, rgb->tex[0]);
       sws.convert(nv12->buf);
       gl::ctx.Finish();  // Ensure EGL rendering completes before Vulkan encoder reads
 
@@ -218,6 +212,7 @@ namespace vk {
     }
 
     int width = 0, height = 0;
+    int offset_x = 0, offset_y = 0;
     AVBufferRef *hw_frames_ctx = nullptr;
     frame_t hwframe;
 
@@ -239,19 +234,7 @@ namespace vk {
   };
 
   int vulkan_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *, AVBufferRef **hw_device_buf) {
-    // Try render device path first, then fallback to device indices
-    if (av_hwdevice_ctx_create(hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, "/dev/dri/renderD128", nullptr, 0) >= 0) {
-      return 0;
-    }
-
-    // Fallback: try device indices for multi-GPU systems
-    const char *devices[] = {"1", "0", "2", "3", nullptr};
-    for (int i = 0; devices[i]; i++) {
-      if (av_hwdevice_ctx_create(hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, devices[i], nullptr, 0) >= 0) {
-        return 0;
-      }
-    }
-    return -1;
+    return av_hwdevice_ctx_create(hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, nullptr, nullptr, 0);
   }
 
   bool validate() {
@@ -264,14 +247,15 @@ namespace vk {
     return true;
   }
 
-  std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_encode_device_vram(int w, int h, int, int) {
-    file_t file = open("/dev/dri/renderD128", O_RDWR);
+  std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_encode_device_vram(int w, int h, int offset_x, int offset_y) {
+    auto render_device = config::video.adapter_name.empty() ? "/dev/dri/renderD128" : config::video.adapter_name.c_str();
+    file_t file = open(render_device, O_RDWR);
     if (file.el < 0) {
-      BOOST_LOG(error) << "Failed to open render device"sv;
+      BOOST_LOG(error) << "Failed to open render device: "sv << render_device;
       return nullptr;
     }
     auto dev = std::make_unique<vk_vram_t>();
-    if (dev->init(w, h, std::move(file)) < 0) return nullptr;
+    if (dev->init(w, h, std::move(file), offset_x, offset_y) < 0) return nullptr;
     return dev;
   }
 
