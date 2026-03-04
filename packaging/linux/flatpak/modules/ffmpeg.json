@@ -3,7 +3,7 @@
   "buildsystem": "simple",
   "build-commands": [
     "mkdir -p /app/ffmpeg",
-    "tar -xzf ffmpeg.tar.gz -C /app/ffmpeg --strip-components=1"
+    "tar --no-same-owner -xzf ffmpeg.tar.gz -C /app/ffmpeg --strip-components=1"
   ],
   "sources": [
     {
