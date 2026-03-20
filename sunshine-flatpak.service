@@ -1,0 +1,16 @@
+[Unit]
+Description=Sunshine Game Streaming (Flatpak)
+After=graphical-session.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=FLATPAK_GL_DRIVERS=mesa-git
+Environment=FLATPAK_BWRAP=/home/chmartin/.local/bin/bwrap
+Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
+ExecStart=/usr/bin/flatpak run dev.lizardbyte.app.Sunshine
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

@@ -16,3 +16,17 @@ docker run --rm -it --privileged \
   -e FFMPEG_TARBALL_OVERRIDE="/workspace/Linux-x86_64-FFMPEG/Linux-x86_64-ffmpeg.tar.gz" \
   sunshine-flatpak-builder \
   bash -lc "./build-flatpak-container.sh"
+
+
+To install and enable systemd service:
+sudo cp sunshine-flatpak.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sunshine-flatpak.service
+
+
+To check status / logs:
+sudo systemctl status sunshine-flatpak.service
+sudo journalctl -u sunshine-flatpak.service -f
+
+
+Note: The PULSE_SERVER path is hardcoded to UID 1000. The PulseAudio socket only exists after your user session starts, so the After=graphical-session.target dependency handles that — but if Sunshine starts before your desktop session is fully up, it may need to restart (which Restart=on-failure covers).
