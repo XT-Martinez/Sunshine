@@ -56,3 +56,5 @@ package-lock.json
 # Python
 *.pyc
 venv/
+
+.flatpak-builder/
