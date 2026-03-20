@@ -367,16 +367,31 @@ namespace confighttp {
       });
     };
 
+    // Helper to check if the Origin/Referer matches the Host header of the request.
+    // This handles LAN access (e.g. https://192.168.x.x:47990) where the Origin won't
+    // match the hardcoded localhost allowed list, but it's still a legitimate same-origin
+    // request since the browser is making a request to the same host it loaded the page from.
+    auto matches_request_host = [&request](const std::string_view url) {
+      const auto host_it = request->header.find("Host");
+      if (host_it == request->header.end()) {
+        return false;
+      }
+      // Origin format is "https://host:port", Host header is "host:port"
+      const std::string expected_origin = std::string("https://") + host_it->second;
+      // Check exact match or that the URL starts with the expected origin followed by "/" (path)
+      return url == expected_origin || (url.rfind(expected_origin, 0) == 0 && url.length() > expected_origin.length() && url[expected_origin.length()] == '/');
+    };
+
     // Check if the request is from the same origin (Origin or Referer header matches configured allowed origins)
     const auto origin_it = request->header.find("Origin");
-    if (origin_it != request->header.end() && is_allowed_origin(origin_it->second)) {
+    if (origin_it != request->header.end() && (is_allowed_origin(origin_it->second) || matches_request_host(origin_it->second))) {
       // Same origin request - allow without CSRF token
       return true;
     }
 
     // If we have a Referer header, check if it's same-origin
     const auto referer_it = request->header.find("Referer");
-    if (referer_it != request->header.end() && is_allowed_origin(referer_it->second)) {
+    if (referer_it != request->header.end() && (is_allowed_origin(referer_it->second) || matches_request_host(referer_it->second))) {
       // Same origin request - allow without CSRF token
       return true;
     }
