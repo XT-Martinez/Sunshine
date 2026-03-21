@@ -41,14 +41,10 @@ namespace pw_capture {
     int32_t pw_format;
   };
 
-  static constexpr std::array<format_map_t, 5> format_map = {{
+  static constexpr std::array<format_map_t, 4> format_map = {{
     {DRM_FORMAT_ARGB8888, SPA_VIDEO_FORMAT_BGRA},
     {DRM_FORMAT_XRGB8888, SPA_VIDEO_FORMAT_BGRx},
-#ifdef SPA_VIDEO_FORMAT_xBGR_210LE
     {DRM_FORMAT_XRGB2101010, SPA_VIDEO_FORMAT_xBGR_210LE},
-#else
-    {0, 0},
-#endif
     {0, 0},
   }};
 
