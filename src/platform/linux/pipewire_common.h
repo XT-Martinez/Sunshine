@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <algorithm>
 #include <string.h>
 #include <vector>
 
@@ -309,7 +310,7 @@ namespace pw_capture {
             img_descriptor->sd.modifier = stream_data.format.info.raw.modifier;
             img_descriptor->sd.fourcc = stream_data.drm_format;
 
-            for (int i = 0; i < MIN(buf->n_datas, 4); i++) {
+            for (int i = 0; i < std::min<int>(buf->n_datas, 4); i++) {
               img_descriptor->sd.fds[i] = dup(buf->datas[i].fd);
               img_descriptor->sd.pitches[i] = buf->datas[i].chunk->stride;
               img_descriptor->sd.offsets[i] = buf->datas[i].chunk->offset;

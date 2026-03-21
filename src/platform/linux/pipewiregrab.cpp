@@ -7,6 +7,7 @@
  * containers, and gamescope integration.
  */
 // standard includes
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -480,7 +481,7 @@ namespace pw_direct {
         BOOST_LOG(warning) << "Some DMA-BUF formats are being ignored"sv;
       }
 
-      for (EGLint i = 0; i < MIN(num_dmabuf_formats, MAX_DMABUF_FORMATS); i++) {
+      for (EGLint i = 0; i < std::min<EGLint>(num_dmabuf_formats, MAX_DMABUF_FORMATS); i++) {
         uint32_t pw_format = lookup_pw_format(dmabuf_formats_arr[i]);
         if (pw_format == 0) {
           continue;
@@ -495,7 +496,7 @@ namespace pw_direct {
         }
 
         dmabuf_infos[n_dmabuf_infos].format = pw_format;
-        dmabuf_infos[n_dmabuf_infos].n_modifiers = MIN(num_modifiers, MAX_DMABUF_MODIFIERS);
+        dmabuf_infos[n_dmabuf_infos].n_modifiers = std::min<EGLint>(num_modifiers, MAX_DMABUF_MODIFIERS);
         size_t mod_size = sizeof(uint64_t) * dmabuf_infos[n_dmabuf_infos].n_modifiers;
         dmabuf_infos[n_dmabuf_infos].modifiers = static_cast<uint64_t *>(malloc(mod_size));
         memcpy(dmabuf_infos[n_dmabuf_infos].modifiers, mods.data(), mod_size);

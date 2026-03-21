@@ -15,6 +15,14 @@ docker run --rm -it --privileged \
   sunshine-flatpak-builder \
   bash -lc "./build-flatpak-container.sh"
 
+podman run --rm -it --privileged \
+  -v "$PWD:/workspace:Z" \
+  -w /workspace \
+  -e CLONE_URL="https://github.com/XT-Martinez/Sunshine" \
+  -e BRANCH="vulkan-pr-4" \
+  sunshine-flatpak-builder \
+  bash -lc "./build-flatpak-container.sh"
+
 
 To install and enable systemd service:
 sudo cp sunshine-flatpak.service /etc/systemd/system/
