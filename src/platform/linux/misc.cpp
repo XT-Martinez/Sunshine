@@ -892,6 +892,9 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_PORTAL
       PORTAL,  ///< XDG PORTAL
 #endif
+#ifdef SUNSHINE_BUILD_PIPEWIRE
+      PIPEWIRE,  ///< Direct PipeWire
+#endif
       MAX_FLAGS  ///< The maximum number of flags
     };
   }  // namespace source
@@ -943,6 +946,15 @@ namespace platf {
   }
 #endif
 
+#ifdef SUNSHINE_BUILD_PIPEWIRE
+  std::vector<std::string> pipewire_display_names();
+  std::shared_ptr<display_t> pipewire_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
+
+  bool verify_pipewire() {
+    return !pipewire_display_names().empty();
+  }
+#endif
+
   std::vector<std::string> display_names(mem_type_e hwdevice_type) {
 #ifdef SUNSHINE_BUILD_CUDA
     // display using NvFBC only supports mem_type_e::cuda
@@ -968,6 +980,11 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_PORTAL
     if (sources[source::PORTAL]) {
       return portal_display_names();
+    }
+#endif
+#ifdef SUNSHINE_BUILD_PIPEWIRE
+    if (sources[source::PIPEWIRE]) {
+      return pipewire_display_names();
     }
 #endif
     return {};
@@ -1011,6 +1028,12 @@ namespace platf {
     if (sources[source::PORTAL]) {
       BOOST_LOG(info) << "Screencasting with XDG portal"sv;
       return portal_display(hwdevice_type, display_name, config);
+    }
+#endif
+#ifdef SUNSHINE_BUILD_PIPEWIRE
+    if (sources[source::PIPEWIRE]) {
+      BOOST_LOG(info) << "Screencasting with direct PipeWire"sv;
+      return pipewire_display(hwdevice_type, display_name, config);
     }
 #endif
 
@@ -1066,6 +1089,11 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_PORTAL
     if ((config::video.capture.empty() || config::video.capture == "portal") && verify_portal()) {
       sources[source::PORTAL] = true;
+    }
+#endif
+#ifdef SUNSHINE_BUILD_PIPEWIRE
+    if (config::video.capture == "pipewire" && verify_pipewire()) {
+      sources[source::PIPEWIRE] = true;
     }
 #endif
 

@@ -226,20 +226,37 @@ if(X11_FOUND)
             "${CMAKE_SOURCE_DIR}/src/platform/linux/x11grab.cpp")
 endif()
 
-# XDG portal
-if(${SUNSHINE_ENABLE_PORTAL})
-    pkg_check_modules(GIO gio-2.0 gio-unix-2.0 REQUIRED)
+# PipeWire (shared dependency for both portal and direct capture)
+if(${SUNSHINE_ENABLE_PORTAL} OR ${SUNSHINE_ENABLE_PIPEWIRE})
     pkg_check_modules(PIPEWIRE libpipewire-0.3 REQUIRED)
 else()
-    set(GIO_FOUND OFF)
     set(PIPEWIRE_FOUND OFF)
 endif()
-if(PIPEWIRE_FOUND)
+
+# XDG portal (requires GIO + PipeWire)
+if(${SUNSHINE_ENABLE_PORTAL})
+    pkg_check_modules(GIO gio-2.0 gio-unix-2.0 REQUIRED)
+else()
+    set(GIO_FOUND OFF)
+endif()
+if(PIPEWIRE_FOUND AND GIO_FOUND)
     add_compile_definitions(SUNSHINE_BUILD_PORTAL)
     include_directories(SYSTEM ${GIO_INCLUDE_DIRS} ${PIPEWIRE_INCLUDE_DIRS})
     list(APPEND PLATFORM_LIBRARIES ${GIO_LIBRARIES} ${PIPEWIRE_LIBRARIES})
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/portalgrab.cpp")
+endif()
+
+# Direct PipeWire capture (requires only PipeWire, no GIO/D-Bus)
+if(PIPEWIRE_FOUND)
+    add_compile_definitions(SUNSHINE_BUILD_PIPEWIRE)
+    if(NOT GIO_FOUND)
+        # Only add PipeWire includes/libs if not already added by portal
+        include_directories(SYSTEM ${PIPEWIRE_INCLUDE_DIRS})
+        list(APPEND PLATFORM_LIBRARIES ${PIPEWIRE_LIBRARIES})
+    endif()
+    list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pipewiregrab.cpp")
 endif()
 
 if(NOT ${CUDA_FOUND}

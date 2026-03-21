@@ -66,4 +66,6 @@ elseif(UNIX)  # Linux
             "Enable X11 grab if available." ON)
     option(SUNSHINE_ENABLE_PORTAL
             "Enable XDG portal grab if available" ON)
+    option(SUNSHINE_ENABLE_PIPEWIRE
+            "Enable direct PipeWire capture (for headless/container setups)" ON)
 endif()

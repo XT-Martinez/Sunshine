@@ -8,12 +8,10 @@ docker run --rm -it --privileged \
   -w /workspace \
   -e INSTALL_SYSTEM_DEPS=0 \
   -e CLONE_URL="https://github.com/XT-Martinez/Sunshine.git" \
-  -e BRANCH="vulkan+pipewire" \
+  -e BRANCH="vulkan-pr-4" \
   -e ENABLE_CUDA=0 \
   -e SKIP_APPSTREAM_COMPOSE=0 \
   -e BUILDER_BACKEND=host \
-  -e TAR_OPTIONS=--no-same-owner \
-  -e FFMPEG_TARBALL_OVERRIDE="/workspace/Linux-x86_64-FFMPEG/Linux-x86_64-ffmpeg.tar.gz" \
   sunshine-flatpak-builder \
   bash -lc "./build-flatpak-container.sh"
 
