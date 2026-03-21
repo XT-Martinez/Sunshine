@@ -22,6 +22,11 @@
 #include <spa/param/video/type-info.h>
 #include <spa/pod/builder.h>
 
+// Gamescope custom PipeWire metadata IDs
+enum {
+  SPA_META_gamescope_hdr_active = 0x70001,
+};
+
 // local includes
 #include "graphics.h"
 #include "src/platform/common.h"
@@ -60,6 +65,7 @@ namespace pw_capture {
     struct spa_video_info format;
     struct pw_buffer *current_buffer;
     uint64_t drm_format;
+    std::atomic<bool> hdr_active {false};
     std::shared_ptr<shared_state_t> shared;
     std::mutex frame_mutex;
     std::condition_variable frame_cv;
@@ -139,6 +145,10 @@ namespace pw_capture {
 
     uint64_t drm_format() const {
       return stream_data.drm_format;
+    }
+
+    bool hdr_active() const {
+      return stream_data.hdr_active.load();
     }
 
     /**
@@ -296,6 +306,12 @@ namespace pw_capture {
           if (buf->n_datas > 0) {
             img_descriptor->pw_flags = buf->datas[0].chunk->flags;
           }
+
+          // Gamescope HDR active metadata
+          uint32_t *hdr_meta = (uint32_t *) spa_buffer_find_meta_data(
+            buf, SPA_META_gamescope_hdr_active, sizeof(*hdr_meta)
+          );
+          stream_data.hdr_active.store(hdr_meta != nullptr && *hdr_meta != 0);
 
           // PipeWire damage metadata
           struct spa_meta_region *damage = (struct spa_meta_region *) spa_buffer_find_meta_data(
