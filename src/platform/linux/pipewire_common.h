@@ -137,6 +137,10 @@ namespace pw_capture {
       stream_data.frame_ready = ready;
     }
 
+    uint64_t drm_format() const {
+      return stream_data.drm_format;
+    }
+
     /**
      * @brief Set a callback invoked when the stream is cleaned up.
      *

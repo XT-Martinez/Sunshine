@@ -435,6 +435,27 @@ namespace pw_direct {
       return true;
     }
 
+    bool is_hdr() override {
+      return pipewire.drm_format() == DRM_FORMAT_XRGB2101010;
+    }
+
+    bool get_hdr_metadata(SS_HDR_METADATA &metadata) override {
+      if (!is_hdr()) {
+        return false;
+      }
+
+      // Standard BT.2020 primaries (normalized to 50,000)
+      metadata.displayPrimaries[0] = { 35400, 14600 };  // Red
+      metadata.displayPrimaries[1] = { 8500, 39850 };   // Green
+      metadata.displayPrimaries[2] = { 6550, 2300 };    // Blue
+      metadata.whitePoint = { 15635, 16450 };            // D65
+      metadata.maxDisplayLuminance = 1000;               // 1000 nits
+      metadata.minDisplayLuminance = 50;                 // 0.005 nits
+      metadata.maxContentLightLevel = 0;
+      metadata.maxFrameAverageLightLevel = 0;
+      return true;
+    }
+
   private:
     bool is_buffer_redundant(const egl::img_descriptor_t *img) {
       if (img->pw_flags.has_value() && (img->pw_flags.value() & SPA_CHUNK_FLAG_CORRUPTED)) {
