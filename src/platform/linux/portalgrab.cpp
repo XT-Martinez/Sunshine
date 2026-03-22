@@ -38,7 +38,12 @@ namespace {
   constexpr uint32_t CURSOR_MODE_EMBEDDED = 2;
 
   constexpr uint32_t PERSIST_FORGET = 0;
-  constexpr uint32_t PERSIST_WHILE_RUNNING = 2;
+  constexpr uint32_t PERSIST_WHILE_RUNNING = 1;
+  constexpr uint32_t PERSIST_UNTIL_REVOKED = 2;
+
+  constexpr uint32_t TYPE_KEYBOARD = 1;
+  constexpr uint32_t TYPE_POINTER = 2;
+  constexpr uint32_t TYPE_TOUCHSCREEN = 4;
 
   // Portal D-Bus interface names and paths
   constexpr const char *PORTAL_NAME = "org.freedesktop.portal.Desktop";
@@ -250,7 +255,7 @@ namespace portal {
         return false;
       }
 
-      if (select_screencast_sources(loop, *session_path) < 0) {
+      if (select_screencast_sources(loop, *session_path, false) < 0) {
         BOOST_LOG(warning) << "ScreenCast.SelectSources failed with RemoteDesktop session, trying ScreenCast-only mode"sv;
         g_free(*session_path);
         *session_path = nullptr;
@@ -267,7 +272,9 @@ namespace portal {
       if (create_portal_session(loop, session_path, new_session_token, true) < 0) {
         return -1;
       }
-      if (select_screencast_sources(loop, *session_path) < 0) {
+      if (select_screencast_sources(loop, *session_path, true) < 0) {
+        g_free(*session_path);
+        *session_path = nullptr;
         return -1;
       }
       return 0;
@@ -362,7 +369,8 @@ namespace portal {
       g_variant_builder_add(&builder, "o", session_path);
       g_variant_builder_open(&builder, G_VARIANT_TYPE("a{sv}"));
       g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string(request_token));
-      g_variant_builder_add(&builder, "{sv}", "persist_mode", g_variant_new_uint32(PERSIST_WHILE_RUNNING));
+      g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(TYPE_KEYBOARD | TYPE_POINTER | TYPE_TOUCHSCREEN));
+      g_variant_builder_add(&builder, "{sv}", "persist_mode", g_variant_new_uint32(PERSIST_UNTIL_REVOKED));
       if (!restore_token_t::empty()) {
         g_variant_builder_add(&builder, "{sv}", "restore_token", g_variant_new_string(restore_token_t::get().c_str()));
       }
@@ -399,7 +407,7 @@ namespace portal {
       return 0;
     }
 
-    int select_screencast_sources(GMainLoop *loop, const gchar *session_path) {
+    int select_screencast_sources(GMainLoop *loop, const gchar *session_path, bool persist) {
       dbus_response_t response = {
         nullptr,
       };
@@ -413,9 +421,11 @@ namespace portal {
       g_variant_builder_add(&builder, "{sv}", "handle_token", g_variant_new_string(request_token));
       g_variant_builder_add(&builder, "{sv}", "types", g_variant_new_uint32(SOURCE_TYPE_MONITOR));
       g_variant_builder_add(&builder, "{sv}", "cursor_mode", g_variant_new_uint32(CURSOR_MODE_EMBEDDED));
-      g_variant_builder_add(&builder, "{sv}", "persist_mode", g_variant_new_uint32(PERSIST_WHILE_RUNNING));
-      if (!restore_token_t::empty()) {
-        g_variant_builder_add(&builder, "{sv}", "restore_token", g_variant_new_string(restore_token_t::get().c_str()));
+      if (persist) {
+        g_variant_builder_add(&builder, "{sv}", "persist_mode", g_variant_new_uint32(PERSIST_UNTIL_REVOKED));
+        if (!restore_token_t::empty()) {
+          g_variant_builder_add(&builder, "{sv}", "restore_token", g_variant_new_string(restore_token_t::get().c_str()));
+        }
       }
       g_variant_builder_close(&builder);
 
@@ -734,7 +744,13 @@ namespace portal {
 
       framerate = config.framerate;
 
-      shared_state = std::make_shared<shared_state_t>();
+      if (!shared_state) {
+        shared_state = std::make_shared<shared_state_t>();
+      } else {
+        shared_state->stream_dead.store(false);
+        shared_state->negotiated_width.store(0);
+        shared_state->negotiated_height.store(0);
+      }
 
       pipewire.set_on_cleanup([] {
         session_cache_t::instance().invalidate();
@@ -762,7 +778,11 @@ namespace portal {
       if (previous_width.load() == width &&
           previous_height.load() == height) {
         if (capture_running.load()) {
-          stream_stopped.store(true);
+          {
+            std::scoped_lock lock(pipewire.frame_mutex());
+            stream_stopped.store(true);
+          }
+          pipewire.frame_cv().notify_all();
         }
       } else {
         previous_width.store(width);
@@ -845,21 +865,15 @@ namespace portal {
       while (true) {
         // Check if PipeWire signaled a state change or error
         if (stream_stopped.load() || shared_state->stream_dead.exchange(false)) {
-          pipewire.cleanup_stream();
-
-          // Add a small delay before reinit to let WirePlumber see state change
-          std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-          // If stream is marked as stopped, clear state and send interrupted status
+          // If stream is marked as stopped, clear state and send error status
           if (stream_stopped.load()) {
             BOOST_LOG(warning) << "PipeWire stream stopped by user."sv;
             capture_running.store(false);
             stream_stopped.store(false);
             previous_height.store(0);
             previous_width.store(0);
-            // Delay interrupt signal to give Portal time to detect change
-            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-            return platf::capture_e::interrupted;
+            pipewire.frame_cv().notify_all();
+            return platf::capture_e::error;
           } else {
             BOOST_LOG(warning) << "PipeWire stream disconnected. Forcing session reset."sv;
             return platf::capture_e::reinit;
@@ -884,8 +898,21 @@ namespace portal {
           case platf::capture_e::error:
           case platf::capture_e::interrupted:
             capture_running.store(false);
+            stream_stopped.store(false);
+            previous_height.store(0);
+            previous_width.store(0);
+            pipewire.frame_cv().notify_all();
             return status;
           case platf::capture_e::timeout:
+            if (!pull_free_image_cb(img_out)) {
+              BOOST_LOG(debug) << "PipeWire: timeout -> interrupt nudge";
+              capture_running.store(false);
+              stream_stopped.store(false);
+              previous_height.store(0);
+              previous_width.store(0);
+              pipewire.frame_cv().notify_all();
+              return platf::capture_e::interrupted;
+            }
             push_captured_image_cb(std::move(img_out), false);
             break;
           case platf::capture_e::ok:
@@ -973,7 +1000,7 @@ namespace portal {
       std::unique_lock<std::mutex> lock(pipewire.frame_mutex());
 
       bool success = pipewire.frame_cv().wait_until(lock, deadline, [&] {
-        return pipewire.is_frame_ready() || stream_stopped.load();
+        return pipewire.is_frame_ready() || stream_stopped.load() || shared_state->stream_dead.load();
       });
 
       if (success && !stream_stopped.load()) {

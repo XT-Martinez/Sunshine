@@ -99,6 +99,9 @@ namespace pw_capture {
     }
 
     ~pipewire_t() {
+      if (loop) {
+        pw_thread_loop_stop(loop);
+      }
       cleanup_stream();
 
       pw_thread_loop_lock(loop);
@@ -113,8 +116,6 @@ namespace pw_capture {
       }
 
       pw_thread_loop_unlock(loop);
-
-      pw_thread_loop_stop(loop);
       if (fd >= 0) {
         close(fd);
       }
@@ -262,15 +263,22 @@ namespace pw_capture {
       pw_thread_loop_unlock(loop);
     }
 
+    static void close_img_fds(egl::img_descriptor_t *img_descriptor) {
+      for (int &fd : img_descriptor->sd.fds) {
+        if (fd >= 0) {
+          close(fd);
+          fd = -1;
+        }
+      }
+    }
+
     void fill_img(platf::img_t *img) {
       pw_thread_loop_lock(loop);
-
-      // 1. Lock the frame mutex immediately to protect against on_process reallocations
       std::scoped_lock lock(stream_data.frame_mutex);
 
-      // Check if the stream is marked dead by modesetting logic
       if (stream_data.shared && stream_data.shared->stream_dead.load()) {
         img->data = nullptr;
+        close_img_fds(static_cast<egl::img_descriptor_t *>(img));
         pw_thread_loop_unlock(loop);
         return;
       }
@@ -397,22 +405,28 @@ namespace pw_capture {
     };
 
     static void on_stream_state_changed(void *user_data, enum pw_stream_state old, enum pw_stream_state state, const char *err_msg) {
+      BOOST_LOG(debug) << "PipeWire stream state: " << pw_stream_state_as_string(old)
+                       << " -> " << pw_stream_state_as_string(state);
+
       auto *d = static_cast<stream_data_t *>(user_data);
 
       switch (state) {
+        case PW_STREAM_STATE_PAUSED:
+          if (d->shared && old == PW_STREAM_STATE_STREAMING) {
+            {
+              std::scoped_lock lock(d->frame_mutex);
+              d->frame_ready = false;
+              d->current_buffer = nullptr;
+              d->shared->stream_dead.store(true, std::memory_order_relaxed);
+            }
+            d->frame_cv.notify_all();
+          }
+          break;
         case PW_STREAM_STATE_ERROR:
         case PW_STREAM_STATE_UNCONNECTED:
           if (d->shared) {
             d->shared->stream_dead.store(true, std::memory_order_relaxed);
-          }
-          break;
-        case PW_STREAM_STATE_PAUSED:
-          // Trigger a reinit to identify if changes occurred
-          if (d->shared && old == PW_STREAM_STATE_STREAMING) {
-            std::scoped_lock lock(d->frame_mutex);
-            d->frame_ready = false;
-            d->current_buffer = nullptr;
-            d->shared->stream_dead.store(true, std::memory_order_relaxed);
+            d->frame_cv.notify_all();
           }
           break;
         default:
