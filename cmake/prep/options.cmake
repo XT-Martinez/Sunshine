@@ -68,4 +68,6 @@ elseif(UNIX)  # Linux
             "Enable XDG portal grab if available" ON)
     option(SUNSHINE_ENABLE_PIPEWIRE
             "Enable direct PipeWire capture (for headless/container setups)" ON)
+    option(SUNSHINE_ENABLE_GAMESCOPE
+            "Enable gamescope scanout export capture if available." ON)
 endif()

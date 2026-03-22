@@ -880,6 +880,9 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_CUDA
       NVFBC,  ///< NvFBC
 #endif
+#ifdef SUNSHINE_BUILD_GAMESCOPE
+      GAMESCOPE,  ///< Gamescope scanout export
+#endif
 #ifdef SUNSHINE_BUILD_WAYLAND
       WAYLAND,  ///< Wayland
 #endif
@@ -907,6 +910,15 @@ namespace platf {
 
   bool verify_nvfbc() {
     return !nvfbc_display_names().empty();
+  }
+#endif
+
+#ifdef SUNSHINE_BUILD_GAMESCOPE
+  std::vector<std::string> gs_display_names();
+  std::shared_ptr<display_t> gs_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
+
+  bool verify_gs() {
+    return window_system == window_system_e::WAYLAND && !gs_display_names().empty();
   }
 #endif
 
@@ -962,6 +974,11 @@ namespace platf {
       return nvfbc_display_names();
     }
 #endif
+#ifdef SUNSHINE_BUILD_GAMESCOPE
+    if (sources[source::GAMESCOPE]) {
+      return gs_display_names();
+    }
+#endif
 #ifdef SUNSHINE_BUILD_WAYLAND
     if (sources[source::WAYLAND]) {
       return wl_display_names();
@@ -1004,6 +1021,12 @@ namespace platf {
     if (sources[source::NVFBC] && hwdevice_type == mem_type_e::cuda) {
       BOOST_LOG(info) << "Screencasting with NvFBC"sv;
       return nvfbc_display(hwdevice_type, display_name, config);
+    }
+#endif
+#ifdef SUNSHINE_BUILD_GAMESCOPE
+    if (sources[source::GAMESCOPE]) {
+      BOOST_LOG(info) << "Screencasting with gamescope scanout export"sv;
+      return gs_display(hwdevice_type, display_name, config);
     }
 #endif
 #ifdef SUNSHINE_BUILD_WAYLAND
@@ -1067,6 +1090,11 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_CUDA
     if (((config::video.capture.empty() && sources.none()) || config::video.capture == "nvfbc") && verify_nvfbc()) {
       sources[source::NVFBC] = true;
+    }
+#endif
+#ifdef SUNSHINE_BUILD_GAMESCOPE
+    if (((config::video.capture.empty() && sources.none()) || config::video.capture == "gamescope") && verify_gs()) {
+      sources[source::GAMESCOPE] = true;
     }
 #endif
 #ifdef SUNSHINE_BUILD_WAYLAND

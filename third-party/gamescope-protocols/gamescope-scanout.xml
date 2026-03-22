@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="gamescope_scanout">
+  <copyright>
+    Copyright © 2024 Valve Corporation
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice (including the next
+    paragraph) shall be included in all copies or substantial portions of the
+    Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+  </copyright>
+
+  <description summary="Direct scanout buffer export for streaming">
+    Exports gamescope's composited output frames as DMA-BUF descriptors
+    without re-compositing. Designed for low-overhead game streaming.
+  </description>
+
+  <interface name="gamescope_scanout" version="1">
+    <description summary="Direct scanout buffer export for streaming">
+      Exports gamescope's composited output frames as DMA-BUF descriptors
+      without re-compositing. Designed for low-overhead game streaming.
+    </description>
+
+    <enum name="subscribe_flags" bitfield="true">
+      <entry name="prefer_hdr" value="0x1"
+             summary="Client prefers HDR output if available"/>
+    </enum>
+
+    <enum name="colorspace">
+      <entry name="sdr_srgb" value="0" summary="SDR sRGB / BT.709"/>
+      <entry name="hdr10_pq" value="1" summary="HDR10 PQ / BT.2020"/>
+    </enum>
+
+    <request name="destroy" type="destructor"/>
+
+    <request name="subscribe">
+      <description summary="Subscribe to scanout frame events">
+        Begin receiving frame events. max_fps=0 means unlimited (match display).
+      </description>
+      <arg name="max_fps" type="uint"/>
+      <arg name="flags" type="uint" enum="subscribe_flags"/>
+    </request>
+
+    <request name="release_buffer">
+      <description summary="Signal that client is done reading a buffer">
+        Must be sent after the client finishes reading/encoding each frame.
+        Gamescope will not render into a buffer until it is released.
+      </description>
+      <arg name="buffer_id" type="uint"/>
+    </request>
+
+    <event name="frame">
+      <description summary="New frame available">
+        Followed by one or more 'plane' events, then 'frame_done'.
+      </description>
+      <arg name="buffer_id" type="uint" summary="Opaque ID for release tracking"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+      <arg name="fourcc" type="uint" summary="DRM_FORMAT_* pixel format"/>
+      <arg name="modifier_hi" type="uint" summary="DRM modifier high 32 bits"/>
+      <arg name="modifier_lo" type="uint" summary="DRM modifier low 32 bits"/>
+      <arg name="num_planes" type="uint"/>
+      <arg name="timestamp_hi" type="uint" summary="CLOCK_MONOTONIC ns high"/>
+      <arg name="timestamp_lo" type="uint" summary="CLOCK_MONOTONIC ns low"/>
+      <arg name="colorspace" type="uint" enum="colorspace"/>
+    </event>
+
+    <event name="plane">
+      <description summary="DMA-BUF plane descriptor">
+        One per plane. Sent between 'frame' and 'frame_done'.
+      </description>
+      <arg name="fd" type="fd"/>
+      <arg name="stride" type="uint"/>
+      <arg name="offset" type="uint"/>
+    </event>
+
+    <event name="frame_done">
+      <description summary="All planes for this frame have been sent"/>
+    </event>
+
+    <event name="hdr_metadata">
+      <description summary="HDR metadata (CTA-861.G). Only sent on change.">
+      </description>
+      <arg name="display_primary_red_x" type="uint"/>
+      <arg name="display_primary_red_y" type="uint"/>
+      <arg name="display_primary_green_x" type="uint"/>
+      <arg name="display_primary_green_y" type="uint"/>
+      <arg name="display_primary_blue_x" type="uint"/>
+      <arg name="display_primary_blue_y" type="uint"/>
+      <arg name="white_point_x" type="uint"/>
+      <arg name="white_point_y" type="uint"/>
+      <arg name="max_display_mastering_luminance" type="uint"/>
+      <arg name="min_display_mastering_luminance" type="uint"/>
+      <arg name="max_cll" type="uint"/>
+      <arg name="max_fall" type="uint"/>
+    </event>
+  </interface>
+</protocol>

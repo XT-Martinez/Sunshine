@@ -209,6 +209,14 @@ if(WAYLAND_FOUND)
             "${CMAKE_SOURCE_DIR}/src/platform/linux/wlgrab.cpp"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/wayland.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/wayland.cpp")
+
+    # gamescope scanout export (requires Wayland)
+    if(${SUNSHINE_ENABLE_GAMESCOPE})
+        add_compile_definitions(SUNSHINE_BUILD_GAMESCOPE)
+        GEN_WAYLAND("${CMAKE_SOURCE_DIR}/third-party/gamescope-protocols" "." gamescope-scanout)
+        list(APPEND PLATFORM_TARGET_FILES
+                "${CMAKE_SOURCE_DIR}/src/platform/linux/gamescopegrab.cpp")
+    endif()
 endif()
 
 # x11
