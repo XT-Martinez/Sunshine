@@ -352,22 +352,13 @@ namespace pw_direct {
 
       pipewire.ensure_stream(mem_type, width, height, framerate, dmabuf_infos.data(), n_dmabuf_infos, display_is_nvidia);
       sleep_overshoot_logger.reset();
-      last_hdr_state = read_gamescope_hdr_status();
 
       while (true) {
-        // Check if PipeWire stream died
+        // Check if PipeWire stream died (e.g. gamescope reconnected for HDR change)
         if (shared_state->stream_dead.exchange(false)) {
           pipewire.cleanup_stream();
           std::this_thread::sleep_for(std::chrono::milliseconds(500));
           BOOST_LOG(warning) << "PipeWire direct: stream disconnected, forcing reinit"sv;
-          return platf::capture_e::reinit;
-        }
-
-        // Check if gamescope HDR state changed — requires encoder reinit
-        bool current_hdr = read_gamescope_hdr_status();
-        if (current_hdr != last_hdr_state) {
-          BOOST_LOG(info) << "PipeWire direct: gamescope HDR state changed to " << (current_hdr ? "active" : "inactive") << ", forcing reinit"sv;
-          last_hdr_state = current_hdr;
           return platf::capture_e::reinit;
         }
 
@@ -445,22 +436,7 @@ namespace pw_direct {
     }
 
     bool is_hdr() override {
-      if (pipewire.drm_format() != DRM_FORMAT_XRGB2101010)
-        return false;
-      return read_gamescope_hdr_status();
-    }
-
-    static bool read_gamescope_hdr_status() {
-      const char *home = getenv("HOME");
-      if (!home) return false;
-      char path[256];
-      snprintf(path, sizeof(path), "%s/.config/gamescope/hdr-status", home);
-      FILE *f = fopen(path, "r");
-      if (!f) return false;
-      int val = 0;
-      if (fscanf(f, "%d", &val) != 1) val = 0;
-      fclose(f);
-      return val != 0;
+      return pipewire.drm_format() == DRM_FORMAT_XRGB2101010;
     }
 
     bool get_hdr_metadata(SS_HDR_METADATA &metadata) override {
@@ -602,7 +578,6 @@ namespace pw_direct {
     std::uint64_t sequence {};
     uint32_t framerate;
     std::shared_ptr<shared_state_t> shared_state;
-    bool last_hdr_state = false;
   };
 }  // namespace pw_direct
 
