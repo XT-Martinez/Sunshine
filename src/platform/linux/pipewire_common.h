@@ -357,6 +357,7 @@ namespace pw_capture {
       struct spa_pod_frame modifier_frame;
       std::array<struct spa_rectangle, 3> sizes;
       std::array<struct spa_fraction, 3> framerates;
+      std::array<struct spa_fraction, 3> max_framerates;
 
       sizes[0] = SPA_RECTANGLE(width, height);  // Preferred
       sizes[1] = SPA_RECTANGLE(1, 1);
@@ -366,13 +367,20 @@ namespace pw_capture {
       framerates[1] = SPA_FRACTION(0, 1);
       framerates[2] = SPA_FRACTION(0, 1);
 
+      // Advertise the requested framerate as maxFramerate so the producer
+      // (e.g. gamescope) can rate-limit its PipeWire output accordingly.
+      uint32_t max_fps = refresh_rate > 0 ? refresh_rate : 60;
+      max_framerates[0] = SPA_FRACTION(max_fps, 1);  // preferred
+      max_framerates[1] = SPA_FRACTION(1, 1);         // min
+      max_framerates[2] = SPA_FRACTION(max_fps, 1);   // max
+
       spa_pod_builder_push_object(b, &object_frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
       spa_pod_builder_add(b, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video), 0);
       spa_pod_builder_add(b, SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), 0);
       spa_pod_builder_add(b, SPA_FORMAT_VIDEO_format, SPA_POD_Id(format), 0);
       spa_pod_builder_add(b, SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&sizes[0], &sizes[1], &sizes[2]), 0);
       spa_pod_builder_add(b, SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&framerates[0], &framerates[1], &framerates[2]), 0);
-      spa_pod_builder_add(b, SPA_FORMAT_VIDEO_maxFramerate, SPA_POD_CHOICE_RANGE_Fraction(&framerates[0], &framerates[1], &framerates[2]), 0);
+      spa_pod_builder_add(b, SPA_FORMAT_VIDEO_maxFramerate, SPA_POD_CHOICE_RANGE_Fraction(&max_framerates[0], &max_framerates[1], &max_framerates[2]), 0);
 
       if (n_modifiers) {
         spa_pod_builder_prop(b, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
