@@ -357,7 +357,7 @@ namespace pw_direct {
         // Check if PipeWire stream died (e.g. gamescope reconnected for HDR change)
         if (shared_state->stream_dead.exchange(false)) {
           pipewire.cleanup_stream();
-          std::this_thread::sleep_for(std::chrono::milliseconds(500));
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
           BOOST_LOG(warning) << "PipeWire direct: stream disconnected, forcing reinit"sv;
           return platf::capture_e::reinit;
         }
