@@ -351,7 +351,22 @@ namespace gs {
         std::memset(&metadata, 0, sizeof(metadata));
         return false;
       }
-      metadata = hdr_meta;
+
+      // Use metadata from gamescope if available, otherwise fall back
+      // to standard BT.2020 primaries (same as PipeWire capture)
+      if (hdr_meta_received) {
+        metadata = hdr_meta;
+      } else {
+        // Standard BT.2020 primaries (normalized to 50,000)
+        metadata.displayPrimaries[0] = { 35400, 14600 };  // Red
+        metadata.displayPrimaries[1] = { 8500, 39850 };   // Green
+        metadata.displayPrimaries[2] = { 6550, 2300 };    // Blue
+        metadata.whitePoint = { 15635, 16450 };            // D65
+        metadata.maxDisplayLuminance = 1000;               // 1000 nits
+        metadata.minDisplayLuminance = 50;                 // 0.005 nits
+        metadata.maxContentLightLevel = 1000;
+        metadata.maxFrameAverageLightLevel = 200;
+      }
       return true;
     }
 
@@ -365,6 +380,7 @@ namespace gs {
     std::condition_variable frame_cv;
     bool frame_ready = false;
     bool hdr_active = false;
+    bool hdr_meta_received = false;
     SS_HDR_METADATA hdr_meta = {};
 
   private:
@@ -398,6 +414,9 @@ namespace gs {
     d->pending.timestamp_ns = ((uint64_t) ts_hi << 32) | ts_lo;
     d->pending.colorspace = colorspace;
     d->pending.planes_received = 0;
+
+    // Track HDR state from per-frame colorspace
+    d->hdr_active = (colorspace == GAMESCOPE_SCANOUT_COLORSPACE_HDR10_PQ);
   }
 
   static void
@@ -432,6 +451,7 @@ namespace gs {
                       uint32_t max_cll, uint32_t max_fall) {
     auto *d = static_cast<display_vram_t *>(data);
     d->hdr_active = true;
+    d->hdr_meta_received = true;
     d->hdr_meta.displayPrimaries[0].x = r_x;
     d->hdr_meta.displayPrimaries[0].y = r_y;
     d->hdr_meta.displayPrimaries[1].x = g_x;
