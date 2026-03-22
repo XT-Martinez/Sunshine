@@ -445,7 +445,14 @@ namespace pw_direct {
     }
 
     bool is_hdr() override {
-      return pipewire.drm_format() == DRM_FORMAT_XRGB2101010 && pipewire.hdr_active();
+      bool fmt_10bit = (pipewire.drm_format() == DRM_FORMAT_XRGB2101010);
+      bool hdr = pipewire.hdr_active();
+      static bool logged = false;
+      if (!logged) {
+        BOOST_LOG(info) << "is_hdr() called: format_10bit=" << fmt_10bit << ", hdr_active=" << hdr;
+        logged = true;
+      }
+      return fmt_10bit && hdr;
     }
 
     bool get_hdr_metadata(SS_HDR_METADATA &metadata) override {

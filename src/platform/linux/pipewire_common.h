@@ -311,7 +311,14 @@ namespace pw_capture {
           uint32_t *hdr_meta = (uint32_t *) spa_buffer_find_meta_data(
             buf, SPA_META_gamescope_hdr_active, sizeof(*hdr_meta)
           );
-          stream_data.hdr_active.store(hdr_meta != nullptr && *hdr_meta != 0);
+          bool new_hdr = (hdr_meta != nullptr && *hdr_meta != 0);
+          bool old_hdr = stream_data.hdr_active.load();
+          if (new_hdr != old_hdr) {
+            BOOST_LOG(info) << "PipeWire HDR metadata changed: " << old_hdr << " -> " << new_hdr
+                            << " (meta_ptr=" << (void*)hdr_meta
+                            << ", value=" << (hdr_meta ? *hdr_meta : 0) << ")";
+          }
+          stream_data.hdr_active.store(new_hdr);
 
           // PipeWire damage metadata
           struct spa_meta_region *damage = (struct spa_meta_region *) spa_buffer_find_meta_data(
