@@ -352,7 +352,6 @@ namespace pw_direct {
 
       pipewire.ensure_stream(mem_type, width, height, framerate, dmabuf_infos.data(), n_dmabuf_infos, display_is_nvidia);
       sleep_overshoot_logger.reset();
-      last_hdr_state = pipewire.hdr_active();
 
       while (true) {
         // Check if PipeWire stream died
@@ -360,14 +359,6 @@ namespace pw_direct {
           pipewire.cleanup_stream();
           std::this_thread::sleep_for(std::chrono::milliseconds(500));
           BOOST_LOG(warning) << "PipeWire direct: stream disconnected, forcing reinit"sv;
-          return platf::capture_e::reinit;
-        }
-
-        // Check if HDR state changed — requires encoder reinit
-        bool current_hdr = pipewire.hdr_active();
-        if (current_hdr != last_hdr_state) {
-          BOOST_LOG(info) << "PipeWire direct: HDR state changed to " << (current_hdr ? "active" : "inactive") << ", forcing reinit"sv;
-          last_hdr_state = current_hdr;
           return platf::capture_e::reinit;
         }
 
@@ -445,14 +436,7 @@ namespace pw_direct {
     }
 
     bool is_hdr() override {
-      bool fmt_10bit = (pipewire.drm_format() == DRM_FORMAT_XRGB2101010);
-      bool hdr = pipewire.hdr_active();
-      static bool logged = false;
-      if (!logged) {
-        BOOST_LOG(info) << "is_hdr() called: format_10bit=" << fmt_10bit << ", hdr_active=" << hdr;
-        logged = true;
-      }
-      return fmt_10bit && hdr;
+      return pipewire.drm_format() == DRM_FORMAT_XRGB2101010;
     }
 
     bool get_hdr_metadata(SS_HDR_METADATA &metadata) override {
@@ -594,7 +578,6 @@ namespace pw_direct {
     std::uint64_t sequence {};
     uint32_t framerate;
     std::shared_ptr<shared_state_t> shared_state;
-    bool last_hdr_state = false;
   };
 }  // namespace pw_direct
 
