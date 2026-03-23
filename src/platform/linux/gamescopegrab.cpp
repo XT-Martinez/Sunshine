@@ -34,26 +34,6 @@ using namespace std::literals;
 
 namespace gs {
 
-  static struct gamescope_scanout *scanout_global = nullptr;
-
-  static void
-  registry_handle_global(void *data, struct wl_registry *registry,
-                         uint32_t name, const char *interface, uint32_t version) {
-    if (std::strcmp(interface, gamescope_scanout_interface.name) == 0) {
-      scanout_global = static_cast<struct gamescope_scanout *>(
-        wl_registry_bind(registry, name, &gamescope_scanout_interface, 1));
-    }
-  }
-
-  static void
-  registry_handle_global_remove(void *data, struct wl_registry *registry, uint32_t name) {
-  }
-
-  static const struct wl_registry_listener registry_listener = {
-    .global = registry_handle_global,
-    .global_remove = registry_handle_global_remove,
-  };
-
   struct pending_frame_t {
     uint32_t buffer_id = 0;
     uint32_t width = 0;
@@ -91,42 +71,25 @@ namespace gs {
 
   class display_vram_t;
 
-  // Wayland event callbacks
-  static void
-  handle_frame(void *data, struct gamescope_scanout *proxy,
-               uint32_t buffer_id, uint32_t w, uint32_t h, uint32_t fourcc,
-               uint32_t mod_hi, uint32_t mod_lo, uint32_t num_planes,
-               uint32_t ts_hi, uint32_t ts_lo, uint32_t colorspace);
+  /**
+   * Persistent Wayland connection that survives display reinit cycles.
+   * Holds the wl_display, registry, scanout proxy, and dispatch thread.
+   * display_vram_t borrows this — on HDR/resolution reinit, only the
+   * display object is destroyed; the connection and dispatch stay alive.
+   */
+  struct connection_t {
+    struct wl_display *wl_dpy = nullptr;
+    struct wl_registry *registry = nullptr;
+    struct gamescope_scanout *scanout = nullptr;
+    std::thread dispatch_thread;
+    std::atomic<bool> running { false };
 
-  static void
-  handle_plane(void *data, struct gamescope_scanout *proxy,
-               int32_t fd, uint32_t stride, uint32_t offset);
+    // The currently active display that receives frame callbacks.
+    // Updated atomically when a new display attaches.
+    std::atomic<display_vram_t *> active_display { nullptr };
 
-  static void
-  handle_frame_done(void *data, struct gamescope_scanout *proxy);
-
-  static void
-  handle_hdr_metadata(void *data, struct gamescope_scanout *proxy,
-                      uint32_t r_x, uint32_t r_y, uint32_t g_x, uint32_t g_y,
-                      uint32_t b_x, uint32_t b_y, uint32_t wp_x, uint32_t wp_y,
-                      uint32_t max_lum, uint32_t min_lum,
-                      uint32_t max_cll, uint32_t max_fall);
-
-  static const struct gamescope_scanout_listener scanout_listener = {
-    .frame = handle_frame,
-    .plane = handle_plane,
-    .frame_done = handle_frame_done,
-    .hdr_metadata = handle_hdr_metadata,
-  };
-
-  class display_vram_t: public platf::display_t {
-  public:
-    ~display_vram_t() {
-      if (dispatch_thread.joinable()) {
-        running = false;
-        dispatch_thread.join();
-      }
-      pending.reset();
+    ~connection_t() {
+      stop();
       if (scanout) {
         gamescope_scanout_destroy(scanout);
       }
@@ -138,63 +101,143 @@ namespace gs {
       }
     }
 
+    void stop() {
+      if (dispatch_thread.joinable()) {
+        running = false;
+        dispatch_thread.join();
+      }
+    }
+  };
+
+  // Persistent connection — shared across display reinit cycles
+  static std::shared_ptr<connection_t> s_conn;
+
+  // Registry listener for detection
+  static struct gamescope_scanout *s_detect_scanout = nullptr;
+
+  static void
+  registry_handle_global(void *data, struct wl_registry *registry,
+                         uint32_t name, const char *interface, uint32_t version) {
+    if (std::strcmp(interface, gamescope_scanout_interface.name) == 0) {
+      auto **target = static_cast<struct gamescope_scanout **>(data);
+      *target = static_cast<struct gamescope_scanout *>(
+        wl_registry_bind(registry, name, &gamescope_scanout_interface, 1));
+    }
+  }
+
+  static void
+  registry_handle_global_remove(void *data, struct wl_registry *registry, uint32_t name) {
+  }
+
+  static const struct wl_registry_listener registry_listener = {
+    .global = registry_handle_global,
+    .global_remove = registry_handle_global_remove,
+  };
+
+  // Forward declarations for event callbacks
+  static void handle_frame(void *data, struct gamescope_scanout *proxy,
+    uint32_t buffer_id, uint32_t w, uint32_t h, uint32_t fourcc,
+    uint32_t mod_hi, uint32_t mod_lo, uint32_t num_planes,
+    uint32_t ts_hi, uint32_t ts_lo, uint32_t colorspace);
+  static void handle_plane(void *data, struct gamescope_scanout *proxy,
+    int32_t fd, uint32_t stride, uint32_t offset);
+  static void handle_frame_done(void *data, struct gamescope_scanout *proxy);
+  static void handle_hdr_metadata(void *data, struct gamescope_scanout *proxy,
+    uint32_t r_x, uint32_t r_y, uint32_t g_x, uint32_t g_y,
+    uint32_t b_x, uint32_t b_y, uint32_t wp_x, uint32_t wp_y,
+    uint32_t max_lum, uint32_t min_lum, uint32_t max_cll, uint32_t max_fall);
+
+  static const struct gamescope_scanout_listener scanout_listener = {
+    .frame = handle_frame,
+    .plane = handle_plane,
+    .frame_done = handle_frame_done,
+    .hdr_metadata = handle_hdr_metadata,
+  };
+
+  /**
+   * Create or reuse the persistent Wayland connection.
+   */
+  static std::shared_ptr<connection_t> get_connection() {
+    if (s_conn && s_conn->wl_dpy) {
+      return s_conn;
+    }
+
+    auto conn = std::make_shared<connection_t>();
+
+    const char *wl_display_name = std::getenv("WAYLAND_DISPLAY");
+    conn->wl_dpy = wl_display_connect(wl_display_name);
+    if (!conn->wl_dpy) {
+      BOOST_LOG(error) << "[gamescopegrab] Failed to connect to Wayland display"sv;
+      return nullptr;
+    }
+
+    struct gamescope_scanout *found_scanout = nullptr;
+    conn->registry = wl_display_get_registry(conn->wl_dpy);
+    wl_registry_add_listener(conn->registry, &registry_listener, &found_scanout);
+    wl_display_roundtrip(conn->wl_dpy);
+
+    if (!found_scanout) {
+      BOOST_LOG(error) << "[gamescopegrab] gamescope_scanout interface not available"sv;
+      return nullptr;
+    }
+
+    conn->scanout = found_scanout;
+
+    // Set up listener — callbacks route through connection_t::active_display
+    gamescope_scanout_add_listener(conn->scanout, &scanout_listener, conn.get());
+
+    // Start dispatch thread
+    conn->running = true;
+    conn->dispatch_thread = std::thread([c = conn.get()]() {
+      while (c->running) {
+        struct pollfd pfd = {};
+        pfd.fd = wl_display_get_fd(c->wl_dpy);
+        pfd.events = POLLIN;
+
+        wl_display_flush(c->wl_dpy);
+
+        int ret = poll(&pfd, 1, 100);
+        if (ret > 0) {
+          wl_display_dispatch(c->wl_dpy);
+        } else if (ret == 0) {
+          wl_display_dispatch_pending(c->wl_dpy);
+        }
+      }
+    });
+
+    s_conn = conn;
+    return conn;
+  }
+
+  class display_vram_t: public platf::display_t {
+  public:
+    ~display_vram_t() {
+      // Detach from connection (don't destroy the connection itself)
+      if (conn) {
+        conn->active_display.store(nullptr, std::memory_order_relaxed);
+      }
+      pending.reset();
+    }
+
     int init(platf::mem_type_e hwdevice_type, const std::string &display_name,
              const ::video::config_t &config) {
       mem_type = hwdevice_type;
       framerate = config.framerate;
 
-      // Connect to gamescope's Wayland display
-      const char *wl_display_name = std::getenv("WAYLAND_DISPLAY");
-      wl_dpy = wl_display_connect(wl_display_name);
-      if (!wl_dpy) {
-        BOOST_LOG(error) << "[gamescopegrab] Failed to connect to Wayland display"sv;
+      conn = get_connection();
+      if (!conn) {
         return -1;
       }
 
-      registry = wl_display_get_registry(wl_dpy);
-      wl_registry_add_listener(registry, &registry_listener, this);
-      wl_display_roundtrip(wl_dpy);
-
-      if (!scanout_global) {
-        BOOST_LOG(error) << "[gamescopegrab] gamescope_scanout interface not available"sv;
-        wl_registry_destroy(registry);
-        registry = nullptr;
-        wl_display_disconnect(wl_dpy);
-        wl_dpy = nullptr;
-        return -1;
-      }
-
-      scanout = scanout_global;
-      scanout_global = nullptr;  // consume it
-
-      gamescope_scanout_add_listener(scanout, &scanout_listener, this);
+      // Attach this display as the active frame receiver
+      conn->active_display.store(this, std::memory_order_release);
 
       // Subscribe with requested framerate
       uint32_t max_fps = framerate > 0 ? framerate : 0;
-      gamescope_scanout_subscribe(scanout, max_fps, 0);
-      wl_display_flush(wl_dpy);
+      gamescope_scanout_subscribe(conn->scanout, max_fps, 0);
+      wl_display_flush(conn->wl_dpy);
 
       BOOST_LOG(info) << "[gamescopegrab] Subscribed to gamescope scanout export (max_fps=" << max_fps << ")"sv;
-
-      // Start dispatch thread
-      running = true;
-      dispatch_thread = std::thread([this]() {
-        while (running) {
-          // Poll the Wayland fd with a timeout
-          struct pollfd pfd = {};
-          pfd.fd = wl_display_get_fd(wl_dpy);
-          pfd.events = POLLIN;
-
-          wl_display_flush(wl_dpy);
-
-          int ret = poll(&pfd, 1, 100);  // 100ms timeout
-          if (ret > 0) {
-            wl_display_dispatch(wl_dpy);
-          } else if (ret == 0) {
-            wl_display_dispatch_pending(wl_dpy);
-          }
-        }
-      });
 
       // Wait for first frame to get dimensions
       {
@@ -229,8 +272,8 @@ namespace gs {
                        << (hdr_active ? " (HDR)" : " (SDR)");
 
       // Release first frame buffer
-      gamescope_scanout_release_buffer(scanout, pending.buffer_id);
-      wl_display_flush(wl_dpy);
+      gamescope_scanout_release_buffer(conn->scanout, pending.buffer_id);
+      wl_display_flush(conn->wl_dpy);
 
       return 0;
     }
@@ -257,8 +300,8 @@ namespace gs {
         if (pending.width != (uint32_t) width || pending.height != (uint32_t) height) {
           BOOST_LOG(info) << "[gamescopegrab] Resolution changed to "sv
                           << pending.width << "x"sv << pending.height;
-          gamescope_scanout_release_buffer(scanout, pending.buffer_id);
-          wl_display_flush(wl_dpy);
+          gamescope_scanout_release_buffer(conn->scanout, pending.buffer_id);
+          wl_display_flush(conn->wl_dpy);
           return platf::capture_e::reinit;
         }
 
@@ -266,8 +309,8 @@ namespace gs {
         if (hdr_active != encoder_hdr_state) {
           BOOST_LOG(info) << "[gamescopegrab] HDR state changed to "sv
                           << (hdr_active ? "HDR" : "SDR");
-          gamescope_scanout_release_buffer(scanout, pending.buffer_id);
-          wl_display_flush(wl_dpy);
+          gamescope_scanout_release_buffer(conn->scanout, pending.buffer_id);
+          wl_display_flush(conn->wl_dpy);
           return platf::capture_e::reinit;
         }
 
@@ -275,8 +318,8 @@ namespace gs {
         std::shared_ptr<platf::img_t> img_out;
         if (!pull_free_image_cb(img_out)) {
           // Release buffer and signal interrupted
-          gamescope_scanout_release_buffer(scanout, pending.buffer_id);
-          wl_display_flush(wl_dpy);
+          gamescope_scanout_release_buffer(conn->scanout, pending.buffer_id);
+          wl_display_flush(conn->wl_dpy);
           return platf::capture_e::interrupted;
         }
 
@@ -308,14 +351,14 @@ namespace gs {
 
         if (!push_captured_image_cb(std::move(img_out), true)) {
           // Release buffer - encoder doesn't want more frames
-          gamescope_scanout_release_buffer(scanout, pending.buffer_id);
-          wl_display_flush(wl_dpy);
+          gamescope_scanout_release_buffer(conn->scanout, pending.buffer_id);
+          wl_display_flush(conn->wl_dpy);
           return platf::capture_e::ok;
         }
 
         // Release the buffer back to gamescope
-        gamescope_scanout_release_buffer(scanout, pending.buffer_id);
-        wl_display_flush(wl_dpy);
+        gamescope_scanout_release_buffer(conn->scanout, pending.buffer_id);
+        wl_display_flush(conn->wl_dpy);
       }
 
       return platf::capture_e::ok;
@@ -390,7 +433,7 @@ namespace gs {
       return true;
     }
 
-    // Called from Wayland event callbacks
+    // Called from Wayland event callbacks (via connection_t dispatch thread)
     pending_frame_t pending;
     std::mutex frame_mutex;
     std::condition_variable frame_cv;
@@ -403,26 +446,23 @@ namespace gs {
     bool encoder_hdr_state = false;
 
   private:
-    struct wl_display *wl_dpy = nullptr;
-    struct wl_registry *registry = nullptr;
-    struct gamescope_scanout *scanout = nullptr;
+    std::shared_ptr<connection_t> conn;
 
     platf::mem_type_e mem_type;
     uint32_t framerate = 0;
     uint64_t sequence = 0;
-
-    std::thread dispatch_thread;
-    std::atomic<bool> running { false };
   };
 
-  // Event callback implementations
+  // Event callbacks — route through connection_t::active_display
   static void
   handle_frame(void *data, struct gamescope_scanout *proxy,
                uint32_t buffer_id, uint32_t w, uint32_t h, uint32_t fourcc,
                uint32_t mod_hi, uint32_t mod_lo, uint32_t num_planes,
                uint32_t ts_hi, uint32_t ts_lo, uint32_t colorspace) {
-    auto *d = static_cast<display_vram_t *>(data);
-    // Close any leftover FDs from a previous incomplete frame
+    auto *conn = static_cast<connection_t *>(data);
+    auto *d = conn->active_display.load(std::memory_order_acquire);
+    if (!d) return;
+
     d->pending.reset();
     d->pending.buffer_id = buffer_id;
     d->pending.width = w;
@@ -434,14 +474,19 @@ namespace gs {
     d->pending.colorspace = colorspace;
     d->pending.planes_received = 0;
 
-    // Track HDR state from per-frame colorspace
     d->hdr_active = (colorspace == GAMESCOPE_SCANOUT_COLORSPACE_HDR10_PQ);
   }
 
   static void
   handle_plane(void *data, struct gamescope_scanout *proxy,
                int32_t fd, uint32_t stride, uint32_t offset) {
-    auto *d = static_cast<display_vram_t *>(data);
+    auto *conn = static_cast<connection_t *>(data);
+    auto *d = conn->active_display.load(std::memory_order_acquire);
+    if (!d) {
+      close(fd);
+      return;
+    }
+
     int i = d->pending.planes_received++;
     if (i < 4) {
       d->pending.fds[i] = fd;
@@ -454,7 +499,10 @@ namespace gs {
 
   static void
   handle_frame_done(void *data, struct gamescope_scanout *proxy) {
-    auto *d = static_cast<display_vram_t *>(data);
+    auto *conn = static_cast<connection_t *>(data);
+    auto *d = conn->active_display.load(std::memory_order_acquire);
+    if (!d) return;
+
     {
       std::lock_guard lock(d->frame_mutex);
       d->frame_ready = true;
@@ -468,7 +516,10 @@ namespace gs {
                       uint32_t b_x, uint32_t b_y, uint32_t wp_x, uint32_t wp_y,
                       uint32_t max_lum, uint32_t min_lum,
                       uint32_t max_cll, uint32_t max_fall) {
-    auto *d = static_cast<display_vram_t *>(data);
+    auto *conn = static_cast<connection_t *>(data);
+    auto *d = conn->active_display.load(std::memory_order_acquire);
+    if (!d) return;
+
     d->hdr_active = true;
     d->hdr_meta_received = true;
     d->hdr_meta.displayPrimaries[0].x = r_x;
@@ -510,16 +561,15 @@ namespace platf {
       return {};
     }
 
-    gs::scanout_global = nullptr;
+    struct gamescope_scanout *found = nullptr;
     struct wl_registry *reg = wl_display_get_registry(dpy);
-    wl_registry_add_listener(reg, &gs::registry_listener, nullptr);
+    wl_registry_add_listener(reg, &gs::registry_listener, &found);
     wl_display_roundtrip(dpy);
 
-    bool available = (gs::scanout_global != nullptr);
+    bool available = (found != nullptr);
 
-    if (gs::scanout_global) {
-      gamescope_scanout_destroy(gs::scanout_global);
-      gs::scanout_global = nullptr;
+    if (found) {
+      gamescope_scanout_destroy(found);
     }
     wl_registry_destroy(reg);
     wl_display_disconnect(dpy);
