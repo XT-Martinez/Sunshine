@@ -218,7 +218,11 @@ namespace gs {
       offset_x = 0;
       offset_y = 0;
 
-      BOOST_LOG(info) << "[gamescopegrab] Capture initialized: "sv << width << "x"sv << height;
+      // Record HDR state from first frame so we can detect changes
+      encoder_hdr_state = hdr_active;
+
+      BOOST_LOG(info) << "[gamescopegrab] Capture initialized: "sv << width << "x"sv << height
+                       << (hdr_active ? " (HDR)" : " (SDR)");
 
       // Release first frame buffer
       gamescope_scanout_release_buffer(scanout, pending.buffer_id);
@@ -249,7 +253,15 @@ namespace gs {
         if (pending.width != (uint32_t) width || pending.height != (uint32_t) height) {
           BOOST_LOG(info) << "[gamescopegrab] Resolution changed to "sv
                           << pending.width << "x"sv << pending.height;
-          // Release the buffer before reinit
+          gamescope_scanout_release_buffer(scanout, pending.buffer_id);
+          wl_display_flush(wl_dpy);
+          return platf::capture_e::reinit;
+        }
+
+        // Check for HDR state change — reinit encoder to switch SDR/HDR
+        if (hdr_active != encoder_hdr_state) {
+          BOOST_LOG(info) << "[gamescopegrab] HDR state changed to "sv
+                          << (hdr_active ? "HDR" : "SDR");
           gamescope_scanout_release_buffer(scanout, pending.buffer_id);
           wl_display_flush(wl_dpy);
           return platf::capture_e::reinit;
@@ -382,6 +394,9 @@ namespace gs {
     bool hdr_active = false;
     bool hdr_meta_received = false;
     SS_HDR_METADATA hdr_meta = {};
+
+    // HDR state that the encoder was initialized with
+    bool encoder_hdr_state = false;
 
   private:
     struct wl_display *wl_dpy = nullptr;
