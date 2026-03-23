@@ -112,9 +112,6 @@ namespace gs {
   // Persistent connection — shared across display reinit cycles
   static std::shared_ptr<connection_t> s_conn;
 
-  // Registry listener for detection
-  static struct gamescope_scanout *s_detect_scanout = nullptr;
-
   static void
   registry_handle_global(void *data, struct wl_registry *registry,
                          uint32_t name, const char *interface, uint32_t version) {
