@@ -198,12 +198,16 @@ namespace gs {
 
       // Wait for first frame to get dimensions
       {
+        auto t0 = std::chrono::steady_clock::now();
         std::unique_lock lock(frame_mutex);
-        if (!frame_cv.wait_for(lock, 5s, [this] { return frame_ready; })) {
+        if (!frame_cv.wait_for(lock, 2s, [this] { return frame_ready; })) {
           BOOST_LOG(error) << "[gamescopegrab] Timeout waiting for first frame"sv;
           return -1;
         }
         frame_ready = false;
+        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - t0);
+        BOOST_LOG(info) << "[gamescopegrab] First frame received in "sv << dt.count() << "ms"sv;
       }
 
       // Set display dimensions from first frame
