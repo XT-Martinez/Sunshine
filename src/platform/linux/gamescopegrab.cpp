@@ -551,7 +551,12 @@ namespace platf {
   }
 
   std::vector<std::string> gs_display_names() {
-    // Try to connect and check if gamescope_scanout is available
+    // Fast path: if persistent connection already exists, interface is available
+    if (gs::s_conn && gs::s_conn->scanout) {
+      return { "0" };
+    }
+
+    // Slow path: create temporary connection to probe
     const char *wl_display_name = std::getenv("WAYLAND_DISPLAY");
     struct wl_display *dpy = wl_display_connect(wl_display_name);
     if (!dpy) {
