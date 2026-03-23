@@ -298,9 +298,6 @@ class Sunshine < Formula
 
     if OS.mac?
       opoo <<~EOS
-        Sunshine can only access microphones on macOS due to system limitations.
-        To stream system audio use "Soundflower" or "BlackHole".
-
         Gamepads are not currently supported on macOS.
       EOS
     end
