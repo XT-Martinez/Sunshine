@@ -187,7 +187,7 @@ namespace portal {
 
     void finalize_portal_security() {
 #if !defined(__FreeBSD__)
-      BOOST_LOG(debug) << "Finalizing Portal security: dropping CAP_SYS_ADMIN and resetting dumpable"sv;
+      BOOST_LOG(debug) << "Finalizing Portal security: dropping capabilities and resetting dumpable"sv;
 
       cap_t caps = cap_get_proc();
       if (!caps) {
@@ -195,10 +195,11 @@ namespace portal {
         return;
       }
 
-      std::array<cap_value_t, 1> remove_list {CAP_SYS_ADMIN};
+      std::array<cap_value_t, 2> effective_list {CAP_SYS_ADMIN, CAP_SYS_NICE};
+      std::array<cap_value_t, 2> permitted_list {CAP_SYS_ADMIN, CAP_SYS_NICE};
 
-      cap_set_flag(caps, CAP_PERMITTED, remove_list.size(), remove_list.data(), CAP_CLEAR);
-      cap_set_flag(caps, CAP_EFFECTIVE, remove_list.size(), remove_list.data(), CAP_CLEAR);
+      cap_set_flag(caps, CAP_EFFECTIVE, effective_list.size(), effective_list.data(), CAP_CLEAR);
+      cap_set_flag(caps, CAP_PERMITTED, permitted_list.size(), permitted_list.data(), CAP_CLEAR);
 
       if (cap_set_proc(caps) != 0) {
         BOOST_LOG(error) << "Failed to prune capabilities: "sv << std::strerror(errno);
@@ -684,6 +685,14 @@ namespace portal {
       }
     }
 
+    bool is_maxframerate_failed() const {
+      return maxframerate_failed_;
+    }
+
+    void set_maxframerate_failed() {
+      maxframerate_failed_ = true;
+    }
+
   private:
     session_cache_t() = default;
 
@@ -704,6 +713,7 @@ namespace portal {
     int width_ = 0;
     int height_ = 0;
     bool valid_ = false;
+    bool maxframerate_failed_ = false;
   };
 
   session_cache_t &session_cache_t::instance() {
