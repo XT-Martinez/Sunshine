@@ -6,7 +6,6 @@
 #include <array>
 #include <atomic>
 #include <bitset>
-#include <cstdlib>
 #include <list>
 #include <thread>
 
@@ -2618,18 +2617,6 @@ namespace video {
     const auto output_name {display_device::map_output_name(config::video.output_name)};
     std::shared_ptr<platf::display_t> disp;
 
-    const char *disable_persistence_env = "SUNSHINE_GAMESCOPEGRAB_DISABLE_PERSISTENCE";
-    const char *previous_disable_persistence = std::getenv(disable_persistence_env);
-    const std::string previous_disable_persistence_value = previous_disable_persistence ? previous_disable_persistence : "";
-    setenv(disable_persistence_env, "1", 1);
-    auto restore_gamescopegrab_persistence = util::fail_guard([&]() {
-      if (previous_disable_persistence) {
-        setenv(disable_persistence_env, previous_disable_persistence_value.c_str(), 1);
-      } else {
-        unsetenv(disable_persistence_env);
-      }
-    });
-
     BOOST_LOG(info) << "Trying encoder ["sv << encoder.name << ']';
     auto fg = util::fail_guard([&]() {
       BOOST_LOG(info) << "Encoder ["sv << encoder.name << "] failed"sv;
@@ -2804,12 +2791,6 @@ namespace video {
     }
 
     fg.disable();
-    restore_gamescopegrab_persistence.disable();
-    if (previous_disable_persistence) {
-      setenv(disable_persistence_env, previous_disable_persistence_value.c_str(), 1);
-    } else {
-      unsetenv(disable_persistence_env);
-    }
     return true;
   }
 
