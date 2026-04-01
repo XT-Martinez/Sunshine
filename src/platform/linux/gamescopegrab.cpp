@@ -8,11 +8,13 @@
 
 // standard includes
 #include <condition_variable>
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <poll.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 
 // lib includes
 #include <wayland-client.h>
@@ -151,6 +153,11 @@ namespace gs {
     .hdr_metadata = handle_hdr_metadata,
   };
 
+  static void release_frame_buffer(connection_t *conn, struct gamescope_scanout *proxy, uint32_t buffer_id) {
+    gamescope_scanout_release_buffer(proxy, buffer_id);
+    wl_display_flush(conn->wl_dpy);
+  }
+
   /**
    * Create or reuse the persistent Wayland connection.
    */
@@ -237,6 +244,7 @@ namespace gs {
       BOOST_LOG(info) << "[gamescopegrab] Subscribed to gamescope scanout export (max_fps=" << max_fps << ")"sv;
 
       // Wait for first frame to get dimensions
+      pending_frame_t first_frame;
       {
         auto t0 = std::chrono::steady_clock::now();
         std::unique_lock lock(frame_mutex);
@@ -244,15 +252,18 @@ namespace gs {
           BOOST_LOG(error) << "[gamescopegrab] Timeout waiting for first frame"sv;
           return -1;
         }
+
+        std::swap(first_frame, pending);
         frame_ready = false;
+
         auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - t0);
         BOOST_LOG(info) << "[gamescopegrab] First frame received in "sv << dt.count() << "ms"sv;
       }
 
       // Set display dimensions from first frame
-      width = pending.width;
-      height = pending.height;
+      width = first_frame.width;
+      height = first_frame.height;
       env_width = width;
       env_height = height;
       logical_width = width;
@@ -269,8 +280,8 @@ namespace gs {
                        << (hdr_active ? " (HDR)" : " (SDR)");
 
       // Release first frame buffer
-      gamescope_scanout_release_buffer(conn->scanout, pending.buffer_id);
-      wl_display_flush(conn->wl_dpy);
+      release_frame_buffer(conn.get(), conn->scanout, first_frame.buffer_id);
+      first_frame.reset();
 
       return 0;
     }
@@ -279,6 +290,8 @@ namespace gs {
                              const pull_free_image_cb_t &pull_free_image_cb,
                              bool *cursor) override {
       while (true) {
+        pending_frame_t frame;
+
         // Wait for next frame from dispatch thread
         {
           std::unique_lock lock(frame_mutex);
@@ -290,15 +303,17 @@ namespace gs {
             }
             continue;
           }
+
+          std::swap(frame, pending);
           frame_ready = false;
         }
 
         // Check for resolution change
-        if (pending.width != (uint32_t) width || pending.height != (uint32_t) height) {
+        if (frame.width != (uint32_t) width || frame.height != (uint32_t) height) {
           BOOST_LOG(info) << "[gamescopegrab] Resolution changed to "sv
-                          << pending.width << "x"sv << pending.height;
-          gamescope_scanout_release_buffer(conn->scanout, pending.buffer_id);
-          wl_display_flush(conn->wl_dpy);
+                          << frame.width << "x"sv << frame.height;
+          release_frame_buffer(conn.get(), conn->scanout, frame.buffer_id);
+          frame.reset();
           return platf::capture_e::reinit;
         }
 
@@ -306,8 +321,8 @@ namespace gs {
         if (hdr_active != encoder_hdr_state) {
           BOOST_LOG(info) << "[gamescopegrab] HDR state changed to "sv
                           << (hdr_active ? "HDR" : "SDR");
-          gamescope_scanout_release_buffer(conn->scanout, pending.buffer_id);
-          wl_display_flush(conn->wl_dpy);
+          release_frame_buffer(conn.get(), conn->scanout, frame.buffer_id);
+          frame.reset();
           return platf::capture_e::reinit;
         }
 
@@ -315,8 +330,8 @@ namespace gs {
         std::shared_ptr<platf::img_t> img_out;
         if (!pull_free_image_cb(img_out)) {
           // Release buffer and signal interrupted
-          gamescope_scanout_release_buffer(conn->scanout, pending.buffer_id);
-          wl_display_flush(conn->wl_dpy);
+          release_frame_buffer(conn.get(), conn->scanout, frame.buffer_id);
+          frame.reset();
           return platf::capture_e::interrupted;
         }
 
@@ -324,22 +339,22 @@ namespace gs {
         img->reset();
 
         // Fill surface descriptor from pending frame
-        img->sd.width = pending.width;
-        img->sd.height = pending.height;
-        img->sd.fourcc = pending.fourcc;
-        img->sd.modifier = pending.modifier;
+        img->sd.width = frame.width;
+        img->sd.height = frame.height;
+        img->sd.fourcc = frame.fourcc;
+        img->sd.modifier = frame.modifier;
         for (int i = 0; i < 4; i++) {
-          img->sd.fds[i] = pending.fds[i];
-          img->sd.pitches[i] = pending.strides[i];
-          img->sd.offsets[i] = pending.offsets[i];
+          img->sd.fds[i] = frame.fds[i];
+          img->sd.pitches[i] = frame.strides[i];
+          img->sd.offsets[i] = frame.offsets[i];
           // Transfer FD ownership to img_descriptor_t (it will close them)
-          pending.fds[i] = -1;
+          frame.fds[i] = -1;
         }
 
         ++sequence;
         img->sequence = sequence;
 
-        auto ts_ns = pending.timestamp_ns;
+        auto ts_ns = frame.timestamp_ns;
         if (ts_ns > 0) {
           auto ts_point = std::chrono::steady_clock::time_point(
             std::chrono::nanoseconds(ts_ns));
@@ -348,14 +363,14 @@ namespace gs {
 
         if (!push_captured_image_cb(std::move(img_out), true)) {
           // Release buffer - encoder doesn't want more frames
-          gamescope_scanout_release_buffer(conn->scanout, pending.buffer_id);
-          wl_display_flush(conn->wl_dpy);
+          release_frame_buffer(conn.get(), conn->scanout, frame.buffer_id);
+          frame.reset();
           return platf::capture_e::ok;
         }
 
         // Release the buffer back to gamescope
-        gamescope_scanout_release_buffer(conn->scanout, pending.buffer_id);
-        wl_display_flush(conn->wl_dpy);
+        release_frame_buffer(conn.get(), conn->scanout, frame.buffer_id);
+        frame.reset();
       }
 
       return platf::capture_e::ok;
@@ -458,20 +473,38 @@ namespace gs {
                uint32_t ts_hi, uint32_t ts_lo, uint32_t colorspace) {
     auto *conn = static_cast<connection_t *>(data);
     auto *d = conn->active_display.load(std::memory_order_acquire);
-    if (!d) return;
+    if (!d) {
+      release_frame_buffer(conn, proxy, buffer_id);
+      return;
+    }
 
-    d->pending.reset();
-    d->pending.buffer_id = buffer_id;
-    d->pending.width = w;
-    d->pending.height = h;
-    d->pending.fourcc = fourcc;
-    d->pending.modifier = ((uint64_t) mod_hi << 32) | mod_lo;
-    d->pending.num_planes = num_planes;
-    d->pending.timestamp_ns = ((uint64_t) ts_hi << 32) | ts_lo;
-    d->pending.colorspace = colorspace;
-    d->pending.planes_received = 0;
+    bool drop_pending = false;
+    uint32_t dropped_buffer_id = 0;
+    {
+      std::lock_guard lock(d->frame_mutex);
+      if (d->frame_ready) {
+        drop_pending = true;
+        dropped_buffer_id = d->pending.buffer_id;
+        d->frame_ready = false;
+      }
 
-    d->hdr_active = (colorspace == GAMESCOPE_SCANOUT_COLORSPACE_HDR10_PQ);
+      d->pending.reset();
+      d->pending.buffer_id = buffer_id;
+      d->pending.width = w;
+      d->pending.height = h;
+      d->pending.fourcc = fourcc;
+      d->pending.modifier = ((uint64_t) mod_hi << 32) | mod_lo;
+      d->pending.num_planes = num_planes;
+      d->pending.timestamp_ns = ((uint64_t) ts_hi << 32) | ts_lo;
+      d->pending.colorspace = colorspace;
+      d->pending.planes_received = 0;
+
+      d->hdr_active = (colorspace == GAMESCOPE_SCANOUT_COLORSPACE_HDR10_PQ);
+    }
+
+    if (drop_pending) {
+      release_frame_buffer(conn, proxy, dropped_buffer_id);
+    }
   }
 
   static void
@@ -484,6 +517,7 @@ namespace gs {
       return;
     }
 
+    std::lock_guard lock(d->frame_mutex);
     int i = d->pending.planes_received++;
     if (i < 4) {
       d->pending.fds[i] = fd;
