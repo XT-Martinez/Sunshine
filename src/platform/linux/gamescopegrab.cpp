@@ -7,6 +7,7 @@
  */
 
 // standard includes
+#include <algorithm>
 #include <condition_variable>
 #include <atomic>
 #include <cstring>
@@ -120,7 +121,7 @@ namespace gs {
     if (std::strcmp(interface, gamescope_scanout_interface.name) == 0) {
       auto **target = static_cast<struct gamescope_scanout **>(data);
       *target = static_cast<struct gamescope_scanout *>(
-        wl_registry_bind(registry, name, &gamescope_scanout_interface, 1));
+        wl_registry_bind(registry, name, &gamescope_scanout_interface, std::min(version, 2u)));
     }
   }
 
@@ -219,7 +220,12 @@ namespace gs {
       // Detach from connection (don't destroy the connection itself)
       if (conn) {
         conn->active_display.store(nullptr, std::memory_order_relaxed);
+        if (conn->scanout) {
+          gamescope_scanout_unsubscribe(conn->scanout);
+          wl_display_flush(conn->wl_dpy);
+        }
       }
+      frame_ready = false;
       pending.reset();
     }
 

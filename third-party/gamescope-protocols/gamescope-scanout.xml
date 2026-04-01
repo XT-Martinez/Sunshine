@@ -28,7 +28,7 @@
     without re-compositing. Designed for low-overhead game streaming.
   </description>
 
-  <interface name="gamescope_scanout" version="1">
+  <interface name="gamescope_scanout" version="2">
     <description summary="Direct scanout buffer export for streaming">
       Exports gamescope's composited output frames as DMA-BUF descriptors
       without re-compositing. Designed for low-overhead game streaming.
@@ -52,6 +52,13 @@
       </description>
       <arg name="max_fps" type="uint"/>
       <arg name="flags" type="uint" enum="subscribe_flags"/>
+    </request>
+
+    <request name="unsubscribe" since="2">
+      <description summary="Stop receiving scanout frame events">
+        Keeps the Wayland connection alive but disables scanout delivery and
+        allows the compositor to stop repainting for this client when idle.
+      </description>
     </request>
 
     <request name="release_buffer">
