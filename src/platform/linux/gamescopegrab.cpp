@@ -34,6 +34,11 @@ using namespace std::literals;
 
 namespace gs {
 
+  static bool use_persistent_connection() {
+    const char *value = std::getenv("SUNSHINE_GAMESCOPEGRAB_DISABLE_PERSISTENCE");
+    return !(value && std::strcmp(value, "1") == 0);
+  }
+
   struct pending_frame_t {
     uint32_t buffer_id = 0;
     uint32_t width = 0;
@@ -155,7 +160,8 @@ namespace gs {
    * Create or reuse the persistent Wayland connection.
    */
   static std::shared_ptr<connection_t> get_connection() {
-    if (s_conn && s_conn->wl_dpy) {
+    const bool persistent = use_persistent_connection();
+    if (persistent && s_conn && s_conn->wl_dpy) {
       return s_conn;
     }
 
@@ -202,7 +208,10 @@ namespace gs {
       }
     });
 
-    s_conn = conn;
+    if (persistent) {
+      s_conn = conn;
+    }
+
     return conn;
   }
 
