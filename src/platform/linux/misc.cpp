@@ -235,6 +235,12 @@ namespace platf {
   }
 
   std::string get_mac_address(const std::string_view &address) {
+    // Allow container environments to provide a stable MAC via env var
+    auto mac_override = std::getenv("SUNSHINE_MAC_ADDRESS");
+    if (mac_override && std::strlen(mac_override) > 0) {
+      return std::string(mac_override);
+    }
+
     auto ifaddrs = get_ifaddrs();
 
 #ifdef __FreeBSD__
