@@ -753,6 +753,18 @@ namespace portal {
         return -1;
       }
 
+      // Hint the client's requested size as preferred for PipeWire format negotiation.
+      // For virtual monitors, Mutter honors this and allocates the virtual display at
+      // that size — matching the Moonlight client and avoiding scaling. For real
+      // monitors, Mutter ignores it and produces frames at native size, which the
+      // post-negotiation block below picks up.
+      if (config.width > 0 && config.height > 0) {
+        BOOST_LOG(info) << "Hinting preferred capture size " << config.width << "x" << config.height
+                        << " (portal reported " << width << "x" << height << ")";
+        width = config.width;
+        height = config.height;
+      }
+
       framerate = config.framerate;
 
       if (!shared_state) {
