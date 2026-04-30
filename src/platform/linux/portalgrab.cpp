@@ -224,13 +224,6 @@ namespace portal {
       // Drop CAP_SYS_ADMIN and set DUMPABLE flag to allow XDG /root access
       finalize_portal_security();
 
-      // Snapshot the user's pre-portal monitor configuration. Mutter
-      // re-evaluates layout when Meta-* materialises during portal Start
-      // and tends to default existing monitors back to their preferred
-      // mode (often 60 Hz). The helper records the current mode IDs so
-      // they can be restored after Start.
-      run_virtmon_helper("snapshot");
-
       // Try combined RemoteDesktop + ScreenCast session first
       bool use_screencast_only = !try_remote_desktop_session(loop, &session_path, session_token);
 
@@ -243,51 +236,11 @@ namespace portal {
         return -1;
       }
 
-      // Position Meta-* and restore the saved modes BEFORE PipeWire is
-      // wired up. Once OpenPipeWireRemote binds the screencast node,
-      // any ApplyMonitorsConfig call invalidates the stream (Mutter's
-      // MonitorsChanged signal kills the screencast source).
-      run_virtmon_helper("apply");
-
       if (open_pipewire_remote(session_path, pipewire_fd) < 0) {
         return -1;
       }
 
       return 0;
-    }
-
-    // Run the virtmon helper script via flatpak-spawn (or directly when
-    // not sandboxed). Controlled by SUNSHINE_VIRTMON_HELPER env var; if
-    // unset, the helper is skipped and Sunshine behaves as upstream.
-    // SUNSHINE_VIRTMON_POSITION selects the placement direction
-    // (below|above|left|right; default below).
-    static void run_virtmon_helper(const char *phase) {
-      const char *helper = std::getenv("SUNSHINE_VIRTMON_HELPER");
-      if (!helper || helper[0] == '\0') {
-        return;
-      }
-
-      const char *position_env = std::getenv("SUNSHINE_VIRTMON_POSITION");
-      std::string position = (position_env && position_env[0]) ? position_env : "below";
-
-      // Inside a flatpak sandbox, shell out via flatpak-spawn so the
-      // helper runs on the host (it talks to host Mutter on the
-      // session bus, and uses /usr/bin/gdctl from the host).
-      bool in_flatpak = std::getenv("FLATPAK_ID") != nullptr;
-      std::string cmd;
-      if (in_flatpak) {
-        cmd = std::format("flatpak-spawn --host {} {} {}", helper, phase,
-                          std::string_view(phase) == "apply" ? position : std::string());
-      } else {
-        cmd = std::format("{} {} {}", helper, phase,
-                          std::string_view(phase) == "apply" ? position : std::string());
-      }
-
-      BOOST_LOG(info) << "virtmon helper: "sv << cmd;
-      int rc = std::system(cmd.c_str());
-      if (rc != 0) {
-        BOOST_LOG(warning) << "virtmon helper "sv << phase << " exited with rc="sv << rc;
-      }
     }
 
     // Try to create a combined RemoteDesktop + ScreenCast session
