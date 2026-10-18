@@ -388,7 +388,7 @@ namespace gs {
       img->sequence = 0;
       img->serial = std::numeric_limits<decltype(img->serial)>::max();
       img->data = nullptr;
-      std::fill_n(img->sd.fds, 4, -1);
+      img->sd.fds.fill(-1);
       return img;
     }
 
