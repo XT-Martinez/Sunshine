@@ -1143,6 +1143,9 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_CUDA
       NVFBC,  ///< NvFBC
 #endif
+#ifdef SUNSHINE_BUILD_GAMESCOPE
+      GAMESCOPE,  ///< Gamescope scanout export
+#endif
 #ifdef SUNSHINE_BUILD_WAYLAND
       WAYLAND,  ///< Wayland
 #endif
@@ -1170,6 +1173,35 @@ namespace platf {
 
   bool verify_nvfbc() {
     return !nvfbc_display_names().empty();
+  }
+#endif
+
+#ifdef SUNSHINE_BUILD_GAMESCOPE
+  /**
+   * @brief Enumerate outputs exported by a gamescope compositor over its scanout protocol.
+   *
+   * @return Display names, or an empty list when no gamescope scanout export is available.
+   */
+  std::vector<std::string> gs_display_names();
+
+  /**
+   * @brief Create a gamescope scanout export capture backend.
+   *
+   * @param hwdevice_type Hardware device type requested for capture or encode.
+   * @param display_name Display name previously returned by gs_display_names().
+   * @param config Stream configuration.
+   * @return Display backend, or nullptr when gamescope capture initialization fails.
+   */
+  std::shared_ptr<display_t> gs_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
+
+  /**
+   * @brief Check whether gamescope scanout export is available.
+   *
+   * @return True when at least one gamescope scanout output is discoverable.
+   */
+  bool verify_gs() {
+    // Deliberately not gated on window_system_e::WAYLAND: gamescope sessions can report XDG_SESSION_TYPE=x11 while still exposing a Wayland socket.
+    return !gs_display_names().empty();
   }
 #endif
 
@@ -1316,6 +1348,11 @@ namespace platf {
       return nvfbc_display_names();
     }
 #endif
+#ifdef SUNSHINE_BUILD_GAMESCOPE
+    if (sources[source::GAMESCOPE]) {
+      return gs_display_names();
+    }
+#endif
 #ifdef SUNSHINE_BUILD_WAYLAND
     if (sources[source::WAYLAND]) {
       return wl_display_names();
@@ -1383,6 +1420,14 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_DRM
     // Drop all DRM worker thread privileges if not needed for this process's lifetime.
     platf::kms::drop_drm_worker_privileges();
+#endif
+
+#ifdef SUNSHINE_BUILD_GAMESCOPE
+    // Gamescope scanout export does not need CAP_SYS_ADMIN, so it is handled after the DRM privilege drop.
+    if (sources[source::GAMESCOPE]) {
+      BOOST_LOG(info) << "Screencasting with gamescope scanout export"sv;
+      return gs_display(hwdevice_type, display_name, config);
+    }
 #endif
 
 #ifdef SUNSHINE_BUILD_WAYLAND
@@ -1468,6 +1513,11 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_CUDA
     if (((selected_capture.empty() && sources.none()) || selected_capture == "nvfbc") && verify_nvfbc()) {
       sources[source::NVFBC] = true;
+    }
+#endif
+#ifdef SUNSHINE_BUILD_GAMESCOPE
+    if (((selected_capture.empty() && sources.none()) || selected_capture == "gamescope") && verify_gs()) {
+      sources[source::GAMESCOPE] = true;
     }
 #endif
 #ifdef SUNSHINE_BUILD_WAYLAND
