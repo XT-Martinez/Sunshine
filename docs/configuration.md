@@ -2247,11 +2247,18 @@ consent prompt for directory ACLs, so the Web UI shows setup steps for correctin
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="8">Choices</td>
+        <td rowspan="9">Choices</td>
         <td>nvfbc</td>
         <td>Use NVIDIA Frame Buffer Capture to capture direct to GPU memory. This is usually the fastest method for
             NVIDIA cards. NvFBC does not have native Wayland support and does not work with XWayland.
             @note{Applies to Linux only.}</td>
+    </tr>
+    <tr>
+        <td>gamescope</td>
+        <td>Capture the scanout output of a gamescope compositor directly via its scanout export protocol. Frames are
+            exported as DMA-BUF descriptors without re-compositing. Sunshine detects the protocol at startup, so no
+            session type is required. Gamescope does not need `cap_sys_admin`.
+            @note{Applies to Linux only and requires a build with `SUNSHINE_ENABLE_GAMESCOPE`, which is ON by default.}</td>
     </tr>
     <tr>
         <td>wlr</td>
