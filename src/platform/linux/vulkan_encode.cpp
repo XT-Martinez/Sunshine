@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <drm_fourcc.h>
 #include <map>
 #include <sys/stat.h>
@@ -363,6 +365,57 @@ namespace vk {
     return result;
   }
 
+  /**
+   * @brief Whether direct RGB input is requested (SUNSHINE_VK_RGB_DIRECT=1).
+   *
+   * Opt-in switch: the encoder converts RGB to YCbCr itself
+   * (VK_VALVE_video_encode_rgb_conversion), so captured frames go to the
+   * encoder without the compute conversion pass.
+   *
+   * @return True if enabled in the environment.
+   */
+  static bool rgb_direct_requested() {
+    static const bool requested = [] {
+      const char *env = std::getenv("SUNSHINE_VK_RGB_DIRECT");
+      return env && std::atoi(env) != 0;
+    }();
+    return requested;
+  }
+
+  /**
+   * @brief Check whether FFmpeg's Vulkan device enabled a device extension.
+   *
+   * @param vk_ctx FFmpeg Vulkan device context.
+   * @param name Extension name.
+   * @return True if the extension is enabled.
+   */
+  static bool device_extension_enabled(const AVVulkanDeviceContext *vk_ctx, const char *name) {
+    for (int i = 0; i < vk_ctx->nb_enabled_dev_extensions; i++) {
+      if (!std::strcmp(vk_ctx->enabled_dev_extensions[i], name)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  std::string rgb_direct_eligible(const rgb_direct_params_t &params) {
+    if (!params.requested) {
+      return "not requested";
+    }
+    if (!params.extension_enabled) {
+      return "the device does not support " VK_VALVE_VIDEO_ENCODE_RGB_CONVERSION_EXTENSION_NAME;
+    }
+    if (!params.ten_bit) {
+      return "the stream is not 10-bit";
+    }
+    if (params.capture_width != params.stream_width || params.capture_height != params.stream_height || params.offset_x || params.offset_y) {
+      return "the capture (" + std::to_string(params.capture_width) + 'x' + std::to_string(params.capture_height) +
+             ") must match the stream (" + std::to_string(params.stream_width) + 'x' +
+             std::to_string(params.stream_height) + ") without cropping";
+    }
+    return {};
+  }
+
   static int create_vulkan_hwdevice(AVBufferRef **hw_device_buf) {
     // Resolve render device path to Vulkan device index
     if (auto render_path = platf::resolve_render_device(); render_path[0] == '/') {
@@ -537,7 +590,7 @@ namespace vk {
       vk_dev.ctx = (AVVulkanDeviceContext *) dev_ctx->hwctx;
       vk_dev.dev = vk_dev.ctx->act_dev;
       vk_dev.phys_dev = vk_dev.ctx->phys_dev;
-      is_10bit = (frames_ctx->sw_format == AV_PIX_FMT_P010);
+      is_10bit = (frames_ctx->sw_format == AV_PIX_FMT_P010) || rgb_direct;
 
       {
         VkPhysicalDeviceProperties p;
@@ -609,6 +662,33 @@ namespace vk {
       frames->initial_pool_size = 4;
       auto *vk_frames = (AVVulkanFramesContext *) frames->hwctx;
       vk_frames->tiling = VK_IMAGE_TILING_OPTIMAL;
+
+      auto *dev_ctx = (AVHWDeviceContext *) frames->device_ref->data;
+      auto *vk_ctx = (AVVulkanDeviceContext *) dev_ctx->hwctx;
+      auto reason = rgb_direct_eligible({
+        .requested = rgb_direct_requested(),
+        .extension_enabled = device_extension_enabled(vk_ctx, VK_VALVE_VIDEO_ENCODE_RGB_CONVERSION_EXTENSION_NAME),
+        .ten_bit = frames->sw_format == AV_PIX_FMT_P010,
+        .capture_width = width,
+        .capture_height = height,
+        .stream_width = frames->width,
+        .stream_height = frames->height,
+        .offset_x = offset_x,
+        .offset_y = offset_y,
+      });
+      rgb_direct = reason.empty();
+      if (rgb_direct_requested() && !rgb_direct) {
+        BOOST_LOG(info) << "[vulkan] Direct RGB input unavailable: "sv << reason << "; using the compute conversion"sv;
+      }
+      if (rgb_direct) {
+        BOOST_LOG(info) << "[vulkan] Direct RGB input: the encoder converts RGB to YCbCr"sv;
+        frames->sw_format = AV_PIX_FMT_X2BGR10;
+        // Only the dummy frame comes from the pool; captured frames are wrapped.
+        frames->initial_pool_size = 1;
+        vk_frames->usage = (VkImageUsageFlagBits) (VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                                   VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR);
+        return;
+      }
       vk_frames->usage = (VkImageUsageFlagBits) (VK_IMAGE_USAGE_STORAGE_BIT |
                                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                                                  VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -623,6 +703,10 @@ namespace vk {
      */
     int convert(platf::img_t &img) override {
       auto &descriptor = (egl::img_descriptor_t &) img;
+
+      if (rgb_direct) {
+        return convert_rgb_direct(descriptor);
+      }
 
       // Get encoder target frame
       if (!frame->buf[0]) {
@@ -714,6 +798,205 @@ namespace vk {
     }
 
   private:
+    /**
+     * @brief Captured DMA-BUF imported as an encoder input image.
+     *
+     * Owned by the AVFrame buffer that wraps it, so it lives until FFmpeg
+     * has finished encoding the frame.
+     */
+    struct wrapped_image_t {
+      AVBufferRef *device_ref = nullptr;  ///< Keeps the Vulkan device alive.
+      VkDevice dev = VK_NULL_HANDLE;  ///< Device the objects belong to.
+      VkImage image = VK_NULL_HANDLE;  ///< Imported image.
+      VkDeviceMemory mem = VK_NULL_HANDLE;  ///< Imported DMA-BUF memory.
+      VkSemaphore sem = VK_NULL_HANDLE;  ///< Timeline semaphore for FFmpeg.
+      AVVkFrame *vkf = nullptr;  ///< Frame handed to FFmpeg.
+    };
+
+    /**
+     * @brief AVBuffer free callback for a wrapped captured image.
+     *
+     * @param opaque The wrapped_image_t.
+     * @param data Unused (the AVVkFrame).
+     */
+    static void free_wrapped_image(void *opaque, uint8_t *) {
+      auto *w = (wrapped_image_t *) opaque;
+      if (w->sem) {
+        vkDestroySemaphore(w->dev, w->sem, nullptr);
+      }
+      if (w->image) {
+        vkDestroyImage(w->dev, w->image, nullptr);
+      }
+      if (w->mem) {
+        vkFreeMemory(w->dev, w->mem, nullptr);
+      }
+      if (w->vkf) {
+        av_free(w->vkf->internal);
+        av_free(w->vkf);
+      }
+      av_buffer_unref(&w->device_ref);
+      delete w;
+    }
+
+    /**
+     * @brief Hand a captured RGB frame to the encoder without conversion.
+     *
+     * Imports the DMA-BUF as a video-encode source image and makes it the
+     * encoder's input frame; the encoder performs the RGB to YCbCr
+     * conversion. The capture must match the stream size (no scaling) and
+     * use an uncompressed modifier (gamescope: GAMESCOPE_UNCOMPRESSED_OUTPUT=1).
+     *
+     * @param descriptor Captured frame.
+     * @return 0 on success, -1 on failure.
+     */
+    int convert_rgb_direct(egl::img_descriptor_t &descriptor) {
+      if (descriptor.sequence == 0) {
+        // Dummy frame: any pool image will do.
+        if (!frame->buf[0] && av_hwframe_get_buffer(hw_frames_ctx, frame, 0) < 0) {
+          BOOST_LOG(error) << "Failed to get Vulkan frame"sv;
+          return -1;
+        }
+        return 0;
+      }
+      if (descriptor.sequence <= sequence && frame->buf[0]) {
+        return 0;
+      }
+      sequence = descriptor.sequence;
+
+      const auto &sd = descriptor.sd;
+      auto *frames_ctx = (AVHWFramesContext *) hw_frames_ctx->data;
+      if (sd.fourcc != DRM_FORMAT_ABGR2101010 && sd.fourcc != DRM_FORMAT_XBGR2101010) {
+        BOOST_LOG(error) << "[vulkan] Direct RGB input needs AB30/XB30 frames, got fourcc 0x"sv << std::hex << sd.fourcc << std::dec;
+        return -1;
+      }
+      if (sd.width != frames_ctx->width || sd.height != frames_ctx->height || offset_x || offset_y || descriptor.y_invert) {
+        BOOST_LOG(error) << "[vulkan] Direct RGB input cannot scale or crop: capture "sv << sd.width << 'x' << sd.height
+                         << ", stream "sv << frames_ctx->width << 'x' << frames_ctx->height;
+        return -1;
+      }
+      if (descriptor.data && !cursor_warned) {
+        BOOST_LOG(warning) << "[vulkan] Direct RGB input does not draw the separate cursor image"sv;
+        cursor_warned = true;
+      }
+
+      int fd = dup(sd.fds[0]);
+      if (fd < 0) {
+        return -1;
+      }
+
+      auto *w = new wrapped_image_t {};
+      w->dev = vk_dev.dev;
+      w->device_ref = av_buffer_ref(frames_ctx->device_ref);
+      auto fail = [&]() {
+        free_wrapped_image(w, nullptr);
+        return -1;
+      };
+
+      VkSubresourceLayout plane_layout = {};
+      plane_layout.offset = sd.offsets[0];
+      plane_layout.rowPitch = sd.pitches[0];
+      VkImageDrmFormatModifierExplicitCreateInfoEXT drm_ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT};
+      drm_ci.drmFormatModifier = sd.modifier;
+      drm_ci.drmFormatModifierPlaneCount = 1;
+      drm_ci.pPlaneLayouts = &plane_layout;
+      VkExternalMemoryImageCreateInfo ext_ci = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+      ext_ci.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+      ext_ci.pNext = sd.modifier != DRM_FORMAT_MOD_INVALID ? &drm_ci : nullptr;
+
+      VkImageCreateInfo img_ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+      img_ci.pNext = &ext_ci;
+      // The image is not tied to one video profile (VK_KHR_video_maintenance1).
+      img_ci.flags = VK_IMAGE_CREATE_VIDEO_PROFILE_INDEPENDENT_BIT_KHR;
+      img_ci.imageType = VK_IMAGE_TYPE_2D;
+      img_ci.format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+      img_ci.extent = {(uint32_t) sd.width, (uint32_t) sd.height, 1};
+      img_ci.mipLevels = 1;
+      img_ci.arrayLayers = 1;
+      img_ci.samples = VK_SAMPLE_COUNT_1_BIT;
+      img_ci.tiling = sd.modifier != DRM_FORMAT_MOD_INVALID ? VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT : VK_IMAGE_TILING_LINEAR;
+      img_ci.usage = VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR;
+      img_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+      if (auto res = vkCreateImage(vk_dev.dev, &img_ci, nullptr, &w->image); res != VK_SUCCESS) {
+        close(fd);
+        if (!import_error_logged) {
+          BOOST_LOG(error) << "[vulkan] Cannot use the captured frame as encoder input ("sv << res << ", modifier 0x"sv << std::hex << sd.modifier << std::dec
+                           << "). Compressed modifiers are not supported: start gamescope with GAMESCOPE_UNCOMPRESSED_OUTPUT=1"sv;
+          import_error_logged = true;
+        }
+        return fail();
+      }
+
+      VkMemoryFdPropertiesKHR fd_props = {.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
+      if (vk_dev.getMemoryFdProperties) {
+        vk_dev.getMemoryFdProperties(vk_dev.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd, &fd_props);
+      }
+      VkMemoryRequirements mem_req;
+      vkGetImageMemoryRequirements(vk_dev.dev, w->image, &mem_req);
+
+      VkImportMemoryFdInfoKHR import_fd = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR};
+      import_fd.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+      import_fd.fd = fd;  // Vulkan takes ownership on success
+      VkMemoryDedicatedAllocateInfo dedicated = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+      dedicated.image = w->image;
+      import_fd.pNext = &dedicated;
+      VkMemoryAllocateInfo alloc_info = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+      alloc_info.pNext = &import_fd;
+      alloc_info.allocationSize = mem_req.size;
+      alloc_info.memoryTypeIndex = find_memory_type(fd_props.memoryTypeBits ? fd_props.memoryTypeBits : mem_req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+      if (auto res = vkAllocateMemory(vk_dev.dev, &alloc_info, nullptr, &w->mem); res != VK_SUCCESS) {
+        close(fd);
+        BOOST_LOG(error) << "vkAllocateMemory for DMA-BUF failed: "sv << res;
+        return fail();
+      }
+      if (auto res = vkBindImageMemory(vk_dev.dev, w->image, w->mem, 0); res != VK_SUCCESS) {
+        BOOST_LOG(error) << "vkBindImageMemory for DMA-BUF failed: "sv << res;
+        return fail();
+      }
+
+      VkSemaphoreTypeCreateInfo sem_type = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+      sem_type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+      VkSemaphoreCreateInfo sem_ci = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+      sem_ci.pNext = &sem_type;
+      if (vkCreateSemaphore(vk_dev.dev, &sem_ci, nullptr, &w->sem) != VK_SUCCESS) {
+        return fail();
+      }
+
+      w->vkf = av_vk_frame_alloc();
+      if (!w->vkf) {
+        return fail();
+      }
+      w->vkf->img[0] = w->image;
+      w->vkf->tiling = img_ci.tiling;
+      w->vkf->mem[0] = w->mem;
+      w->vkf->size[0] = mem_req.size;
+      w->vkf->flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+      // Acquired from the exporter (gamescope): contents are defined in GENERAL.
+      w->vkf->layout[0] = VK_IMAGE_LAYOUT_GENERAL;
+      w->vkf->access[0] = VK_ACCESS_2_NONE;
+      // FFmpeg's encode barrier releases to VK_QUEUE_FAMILY_IGNORED, so no
+      // ownership transfer; fine for an uncompressed import.
+      w->vkf->queue_family[0] = VK_QUEUE_FAMILY_IGNORED;
+      w->vkf->sem[0] = w->sem;
+      w->vkf->sem_value[0] = 0;
+
+      AVBufferRef *buf = av_buffer_create((uint8_t *) w->vkf, sizeof(AVVkFrame), &free_wrapped_image, w, 0);
+      if (!buf) {
+        return fail();
+      }
+
+      // Swap the frame's image, keeping its properties and side data
+      // (colorspace, HDR metadata) that the encoder reads.
+      av_buffer_unref(&frame->buf[0]);
+      frame->buf[0] = buf;
+      frame->data[0] = (uint8_t *) w->vkf;
+      frame->format = AV_PIX_FMT_VULKAN;
+      if (!frame->hw_frames_ctx) {
+        frame->hw_frames_ctx = av_buffer_ref(hw_frames_ctx);
+      }
+      return 0;
+    }
+
     bool create_compute_pipeline() {
       // Shader module
       VkShaderModuleCreateInfo shader_ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -1327,6 +1610,9 @@ namespace vk {
     int offset_x = 0;
     int offset_y = 0;
     bool is_10bit = false;
+    bool rgb_direct = false;  ///< Encoder converts RGB itself (VK_VALVE_video_encode_rgb_conversion).
+    bool cursor_warned = false;  ///< Logged that the direct path skips the cursor.
+    bool import_error_logged = false;  ///< Logged a direct-input import failure.
     AVBufferRef *hw_frames_ctx = nullptr;
     frame_t hwframe;
     std::uint64_t sequence = 0;

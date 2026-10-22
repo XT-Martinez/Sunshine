@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <map>
+#include <string>
 #include <vector>
 
 extern "C" struct AVBufferRef;
@@ -51,6 +52,33 @@ namespace vk {
    * @return Constructed AVCodec encode device VRAM object.
    */
   std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_encode_device_vram(int width, int height, int offset_x, int offset_y);
+
+  /**
+   * @brief Input to rgb_direct_eligible(): what the stream and capture look like.
+   */
+  struct rgb_direct_params_t {
+    bool requested;  ///< SUNSHINE_VK_RGB_DIRECT is set.
+    bool extension_enabled;  ///< The device enabled VK_VALVE_video_encode_rgb_conversion.
+    bool ten_bit;  ///< The stream is encoded as 10-bit (P010).
+    int capture_width;  ///< Captured frame width.
+    int capture_height;  ///< Captured frame height.
+    int stream_width;  ///< Encoded stream width.
+    int stream_height;  ///< Encoded stream height.
+    int offset_x;  ///< Capture crop offset x.
+    int offset_y;  ///< Capture crop offset y.
+  };
+
+  /**
+   * @brief Decide whether captured RGB frames can go to the encoder unconverted.
+   *
+   * The encoder converts RGB to YCbCr itself (VK_VALVE_video_encode_rgb_conversion).
+   * It takes gamescope's A2B10G10R10 output for 10-bit streams only, and it
+   * cannot scale or crop, so the capture must match the stream size.
+   *
+   * @param params Stream and capture properties.
+   * @return Empty string when eligible, otherwise the reason it is not.
+   */
+  std::string rgb_direct_eligible(const rgb_direct_params_t &params);
 
   /**
    * @brief Check if FFmpeg Vulkan Video encoding is available.

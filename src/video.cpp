@@ -2138,6 +2138,8 @@ namespace video {
 
           // Allow the hwdevice to modify hwframe context parameters
           encode_device->init_hwframes(frame_ctx);
+          // The encoder input format may change (e.g. RGB input to the Vulkan encoder)
+          ctx->sw_pix_fmt = frame_ctx->sw_format;
 
           if (auto err = av_hwframe_ctx_init(frame_ref.get()); err < 0) {
             return nullptr;
