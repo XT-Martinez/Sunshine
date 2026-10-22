@@ -366,18 +366,18 @@ namespace vk {
   }
 
   /**
-   * @brief Whether direct RGB input is requested (SUNSHINE_VK_RGB_DIRECT=1).
+   * @brief Whether direct RGB input is allowed (SUNSHINE_VK_RGB_DIRECT=0 turns it off).
    *
-   * Opt-in switch: the encoder converts RGB to YCbCr itself
+   * On by default: the encoder converts RGB to YCbCr itself
    * (VK_VALVE_video_encode_rgb_conversion), so captured frames go to the
    * encoder without the compute conversion pass.
    *
-   * @return True if enabled in the environment.
+   * @return False only if turned off in the environment.
    */
   static bool rgb_direct_requested() {
     static const bool requested = [] {
       const char *env = std::getenv("SUNSHINE_VK_RGB_DIRECT");
-      return env && std::atoi(env) != 0;
+      return !env || !*env || std::atoi(env) != 0;
     }();
     return requested;
   }
@@ -400,7 +400,7 @@ namespace vk {
 
   std::string rgb_direct_eligible(const rgb_direct_params_t &params) {
     if (!params.requested) {
-      return "not requested";
+      return "turned off with SUNSHINE_VK_RGB_DIRECT=0";
     }
     if (!params.extension_enabled) {
       return "the device does not support " VK_VALVE_VIDEO_ENCODE_RGB_CONVERSION_EXTENSION_NAME;

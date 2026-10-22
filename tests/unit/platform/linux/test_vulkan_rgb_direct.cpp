@@ -28,14 +28,14 @@ namespace {
     };
   }
 
-  TEST(VulkanRgbDirect, EligibleWhenRequestedTenBitAndSameSize) {
+  TEST(VulkanRgbDirect, EligibleWhenTenBitAndSameSize) {
     EXPECT_EQ(vk::rgb_direct_eligible(eligible_params()), "");
   }
 
-  TEST(VulkanRgbDirect, NotEligibleWhenNotRequested) {
+  TEST(VulkanRgbDirect, NotEligibleWhenTurnedOff) {
     auto params = eligible_params();
     params.requested = false;
-    EXPECT_EQ(vk::rgb_direct_eligible(params), "not requested");
+    EXPECT_EQ(vk::rgb_direct_eligible(params), "turned off with SUNSHINE_VK_RGB_DIRECT=0");
   }
 
   TEST(VulkanRgbDirect, NotEligibleWithoutExtension) {

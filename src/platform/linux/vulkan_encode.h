@@ -57,7 +57,7 @@ namespace vk {
    * @brief Input to rgb_direct_eligible(): what the stream and capture look like.
    */
   struct rgb_direct_params_t {
-    bool requested;  ///< SUNSHINE_VK_RGB_DIRECT is set.
+    bool requested;  ///< SUNSHINE_VK_RGB_DIRECT is not 0.
     bool extension_enabled;  ///< The device enabled VK_VALVE_video_encode_rgb_conversion.
     bool ten_bit;  ///< The stream is encoded as 10-bit (P010).
     int capture_width;  ///< Captured frame width.
