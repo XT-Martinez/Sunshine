@@ -190,6 +190,10 @@ namespace gs {
     // Start dispatch thread
     conn->running = true;
     conn->dispatch_thread = std::thread([c = conn.get()]() {
+      // Every captured frame passes through this thread first
+      platf::set_thread_name("gamescope::wl");
+      platf::adjust_thread_priority(platf::thread_priority_e::critical);
+
       while (c->running) {
         struct pollfd pfd = {};
         pfd.fd = wl_display_get_fd(c->wl_dpy);

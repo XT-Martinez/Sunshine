@@ -13,6 +13,7 @@
 #endif
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstring>
@@ -577,6 +578,18 @@ namespace platf {
 
     if (!success) {
       // This will run on FreeBSD OR Linux if RTKit failed/was missing
+      // Without CAP_SYS_NICE, RLIMIT_NICE sets the lowest nice allowed
+      // (20 - rlim_cur); use that rather than staying at 0 when it is
+      // above the requested value, e.g. -10 for critical in a container.
+      struct rlimit nice_limit;
+      if (linux_nice < 0 && getrlimit(RLIMIT_NICE, &nice_limit) == 0 && nice_limit.rlim_cur != RLIM_INFINITY) {
+        const int32_t floor = 20 - static_cast<int32_t>(std::min<rlim_t>(nice_limit.rlim_cur, 40));
+        if (floor > linux_nice && floor < 0) {
+          BOOST_LOG(debug) << "RLIMIT_NICE allows nice "sv << floor << ", not "sv << linux_nice;
+          linux_nice = floor;
+        }
+      }
+
       if (setpriority(PRIO_PROCESS, 0, linux_nice) == -1) {
         BOOST_LOG(warning) << "setpriority failed for nice "sv << linux_nice << ": "sv << strerror(errno);
       } else {
