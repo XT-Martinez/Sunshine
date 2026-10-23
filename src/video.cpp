@@ -479,6 +479,12 @@ namespace video {
 
       inject = other.inject;
 
+      ref_invalidation = other.ref_invalidation;
+      last_rfi_range = other.last_rfi_range;
+      last_encoded_frame = other.last_encoded_frame;
+      rfi_frame = other.rfi_frame;
+      pending_rfi_first = other.pending_rfi_first;
+
       return *this;
     }
 
@@ -524,8 +530,28 @@ namespace video {
      * @param last_frame Last frame.
      */
     void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
-      BOOST_LOG(error) << "Encoder doesn't support reference frame invalidation";
-      request_idr_frame();
+      if (!ref_invalidation) {
+        BOOST_LOG(error) << "Encoder doesn't support reference frame invalidation";
+        request_idr_frame();
+        return;
+      }
+
+      if (last_frame < first_frame) {
+        BOOST_LOG(error) << "Invalid reference frame invalidation range: "sv << first_frame << " - "sv << last_frame;
+        request_idr_frame();
+        return;
+      }
+
+      // Moonlight may resend the same request, so skip ranges that are already covered
+      if (first_frame >= last_rfi_range.first && last_frame <= last_rfi_range.second) {
+        BOOST_LOG(debug) << "Reference frame invalidation already done for range: "sv << first_frame << " - "sv << last_frame;
+        return;
+      }
+
+      last_rfi_range = {first_frame, std::max(last_frame, last_encoded_frame)};
+      pending_rfi_first = pending_rfi_first ? std::min(*pending_rfi_first, first_frame) : first_frame;
+
+      BOOST_LOG(debug) << "Reference frame invalidation requested for range: "sv << last_rfi_range.first << " - "sv << last_rfi_range.second;
     }
 
     avcodec_ctx_t avcodec_ctx;  ///< FFmpeg codec context owned by the encode session.
@@ -538,6 +564,12 @@ namespace video {
 
     // inject sps/vps data into idr pictures
     int inject;  ///< Number of upcoming IDR frames that should receive rewritten parameter sets.
+
+    bool ref_invalidation = false;  ///< Whether the encoder supports reference frame invalidation through metadata.
+    std::pair<int64_t, int64_t> last_rfi_range {-1, -1};  ///< Last reference frame invalidation range requested, as {first, last}.
+    int64_t last_encoded_frame = -1;  ///< Frame number of the most recent packet produced by the encoder.
+    int64_t rfi_frame = -1;  ///< Frame number carrying a pending reference frame invalidation request, or -1.
+    std::optional<int64_t> pending_rfi_first;  ///< First invalidated frame not yet handed to the encoder, if any.
   };
 
   /**
@@ -626,6 +658,7 @@ namespace video {
     safe::mail_raw_t::event_t<bool> shutdown_event;  ///< Event raised when the stream should shut down.
     safe::mail_raw_t::queue_t<packet_t> packets;  ///< Queue receiving encoded video packets for the stream sender.
     safe::mail_raw_t::event_t<bool> idr_events;  ///< Event raised when an IDR frame is requested.
+    safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;  ///< Event carrying the reference-frame range to invalidate.
     safe::mail_raw_t::event_t<hdr_info_t> hdr_events;  ///< Event carrying updated HDR metadata.
     safe::mail_raw_t::event_t<input::touch_port_t> touch_port_events;  ///< Event carrying updated touch viewport metadata.
 
@@ -1317,6 +1350,8 @@ namespace video {
         {"usage"s, "stream"s},
         {"content"s, "rendered"s},
         {"async_depth"s, 1},
+        // Older frames kept to recover from loss without a keyframe (all but one AV1 slot)
+        {"ref_history"s, 6},
       },
       {},  // SDR-specific options
       {},  // HDR-specific options
@@ -1336,6 +1371,8 @@ namespace video {
         {"usage"s, "stream"s},
         {"content"s, "rendered"s},
         {"async_depth"s, 1},
+        // Older frames kept to recover from loss without a keyframe (a DPB of 6 fits the level at 4K)
+        {"ref_history"s, 5},
       },
       {},  // SDR-specific options
       {},  // HDR-specific options
@@ -1364,7 +1401,7 @@ namespace video {
       "h264_vulkan"s,
       {},  // capabilities
     },
-    LIMITED_GOP_SIZE | PARALLEL_ENCODING
+    LIMITED_GOP_SIZE | PARALLEL_ENCODING | REF_FRAMES_INVALIDATION
   };
   #endif  // SUNSHINE_BUILD_VULKAN
 #endif  // linux
@@ -1836,8 +1873,18 @@ namespace video {
     auto &sps = session.sps;
     auto &vps = session.vps;
 
+    if (session.pending_rfi_first) {
+      av_dict_set(&frame->metadata, "hw_encode_invalidate_refs", std::to_string(*session.pending_rfi_first).c_str(), 0);
+      session.rfi_frame = frame_nr;
+      session.pending_rfi_first.reset();
+    }
+
     // send the frame to the encoder
     auto ret = avcodec_send_frame(ctx.get(), frame);
+
+    // the invalidation request only applies to this frame
+    av_dict_set(&frame->metadata, "hw_encode_invalidate_refs", nullptr, 0);
+
     if (ret < 0) {
       std::array<char, AV_ERROR_MAX_STRING_SIZE> err_str {0};
       BOOST_LOG(error) << "Could not send a frame for encoding: "sv << av_make_error_string(err_str.data(), AV_ERROR_MAX_STRING_SIZE, ret);
@@ -1854,6 +1901,15 @@ namespace video {
         return 0;
       } else if (ret < 0) {
         return ret;
+      }
+
+      session.last_encoded_frame = av_packet->pts;
+
+      if (av_packet->pts == session.rfi_frame) {
+        if (!(av_packet->flags & AV_PKT_FLAG_KEY)) {
+          packet->after_ref_frame_invalidation = true;
+        }
+        session.rfi_frame = -1;
       }
 
       if (av_packet->flags & AV_PKT_FLAG_KEY) {
@@ -2348,6 +2404,7 @@ namespace video {
       // 0 ==> don't inject, 1 ==> inject for h264, 2 ==> inject for hevc
       config.videoFormat <= 1 ? (1 - static_cast<int>(video_format[encoder_t::VUI_PARAMETERS])) * (1 + config.videoFormat) : 0
     );
+    session->ref_invalidation = (encoder.flags & REF_FRAMES_INVALIDATION) != 0;
 
     return session;
   }
@@ -2778,6 +2835,12 @@ namespace video {
             continue;
           }
 
+          while (ctx->invalidate_ref_frames_events->peek()) {
+            if (auto frames = ctx->invalidate_ref_frames_events->pop(0ms)) {
+              pos->session->invalidate_ref_frames(frames->first, frames->second);
+            }
+          }
+
           if (ctx->idr_events->peek()) {
             pos->session->request_idr_frame();
             ctx->idr_events->pop();
@@ -2985,6 +3048,7 @@ namespace video {
         mail->event<bool>(mail::shutdown),
         mail::man->queue<packet_t>(mail::video_packets),
         std::move(idr_events),
+        mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames),
         mail->event<hdr_info_t>(mail::hdr),
         mail->event<input::touch_port_t>(mail::touch_port),
         config,
