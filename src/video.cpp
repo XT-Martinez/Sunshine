@@ -2498,6 +2498,15 @@ namespace video {
     std::chrono::duration<double, std::milli> max_frametime {1000.0 / minimum_fps_target};
     BOOST_LOG(info) << "Minimum FPS target set to ~"sv << minimum_fps_target << "fps ("sv << max_frametime.count() << "ms)"sv;
 
+    // Stages of the frame processing latency Moonlight shows, from the
+    // capture timestamp to the packet reaching the sender (stream.cpp logs the total)
+    logging::min_max_avg_periodic_logger<double> capture_handoff_logger(debug, "Latency: capture to encoder thread", "ms");
+    logging::min_max_avg_periodic_logger<double> convert_latency_logger(debug, "Latency: convert", "ms");
+    logging::min_max_avg_periodic_logger<double> encode_latency_logger(debug, "Latency: encode", "ms");
+    auto to_ms = [](std::chrono::steady_clock::duration d) {
+      return std::chrono::duration<double, std::milli>(d).count();
+    };
+
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
@@ -2538,9 +2547,16 @@ namespace video {
       if (!requested_idr_frame || images->peek()) {
         if (auto img = images->pop(max_frametime)) {
           frame_timestamp = img->frame_timestamp;
+          auto convert_start = std::chrono::steady_clock::now();
+          if (frame_timestamp) {
+            capture_handoff_logger.collect_and_log(to_ms(convert_start - *frame_timestamp));
+          }
           if (session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             return;
+          }
+          if (frame_timestamp) {
+            convert_latency_logger.collect_and_log(to_ms(std::chrono::steady_clock::now() - convert_start));
           }
         } else if (!images->running()) {
           break;
@@ -2561,9 +2577,13 @@ namespace video {
         break;
       }
 
+      auto encode_start = std::chrono::steady_clock::now();
       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         return;
+      }
+      if (frame_timestamp) {
+        encode_latency_logger.collect_and_log(to_ms(std::chrono::steady_clock::now() - encode_start));
       }
 
       session->request_normal_frame();
