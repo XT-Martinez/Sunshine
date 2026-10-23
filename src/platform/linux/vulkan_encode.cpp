@@ -486,6 +486,9 @@ namespace vk {
   class vk_vram_t: public platf::avcodec_encode_device_t {
   public:
     ~vk_vram_t() override {
+      for (auto &entry : import_cache) {
+        av_buffer_unref(&entry.buf);
+      }
       cleanup_pipeline();
     }
 
@@ -879,6 +882,25 @@ namespace vk {
         cursor_warned = true;
       }
 
+      // gamescope cycles a few output buffers: reuse the import of a buffer
+      // seen before instead of importing (and later freeing) it every frame
+      struct stat st;
+      if (fstat(sd.fds[0], &st) < 0) {
+        return -1;
+      }
+      ++import_use;
+      for (auto &entry : import_cache) {
+        if (entry.ino == st.st_ino && entry.width == sd.width && entry.height == sd.height && entry.modifier == sd.modifier && entry.offset == sd.offsets[0] && entry.pitch == sd.pitches[0]) {
+          entry.last_used = import_use;
+          auto *vkf = (AVVkFrame *) entry.buf->data;
+          // gamescope rewrote the buffer since the last encode
+          vkf->layout[0] = VK_IMAGE_LAYOUT_GENERAL;
+          vkf->access[0] = VK_ACCESS_2_NONE;
+          vkf->queue_family[0] = VK_QUEUE_FAMILY_IGNORED;
+          return set_wrapped_frame(entry.buf);
+        }
+      }
+
       int fd = dup(sd.fds[0]);
       if (fd < 0) {
         return -1;
@@ -985,11 +1007,37 @@ namespace vk {
         return fail();
       }
 
-      // Swap the frame's image, keeping its properties and side data
-      // (colorspace, HDR metadata) that the encoder reads.
+      // The cache keeps this reference; drop the least recently used import
+      // past a few buffers (a resize leaves the old ones unused).
+      if (import_cache.size() >= max_cached_imports) {
+        auto lru = std::min_element(import_cache.begin(), import_cache.end(), [](const auto &a, const auto &b) {
+          return a.last_used < b.last_used;
+        });
+        av_buffer_unref(&lru->buf);
+        import_cache.erase(lru);
+      }
+      import_cache.push_back({st.st_ino, sd.width, sd.height, sd.modifier, sd.offsets[0], sd.pitches[0], buf, import_use});
+
+      return set_wrapped_frame(buf);
+    }
+
+    /**
+     * @brief Make an imported capture buffer the encoder's input frame.
+     *
+     * Swaps the frame's image, keeping its properties and side data
+     * (colorspace, HDR metadata) that the encoder reads.
+     *
+     * @param buf Cached import; the frame takes its own reference.
+     * @return 0 on success, -1 on failure.
+     */
+    int set_wrapped_frame(AVBufferRef *buf) {
+      AVBufferRef *ref = av_buffer_ref(buf);
+      if (!ref) {
+        return -1;
+      }
       av_buffer_unref(&frame->buf[0]);
-      frame->buf[0] = buf;
-      frame->data[0] = (uint8_t *) w->vkf;
+      frame->buf[0] = ref;
+      frame->data[0] = ref->data;
       frame->format = AV_PIX_FMT_VULKAN;
       if (!frame->hw_frames_ctx) {
         frame->hw_frames_ctx = av_buffer_ref(hw_frames_ctx);
@@ -1616,6 +1664,24 @@ namespace vk {
     AVBufferRef *hw_frames_ctx = nullptr;
     frame_t hwframe;
     std::uint64_t sequence = 0;
+
+    /**
+     * @brief A capture buffer imported for the direct RGB path.
+     */
+    struct import_cache_entry_t {
+      ino_t ino;  ///< Inode of the DMA-BUF, unique per buffer.
+      int width;  ///< Buffer width.
+      int height;  ///< Buffer height.
+      std::uint64_t modifier;  ///< DRM format modifier.
+      std::uint32_t offset;  ///< Plane offset.
+      std::uint32_t pitch;  ///< Plane pitch.
+      AVBufferRef *buf;  ///< Reference to the wrapped image (an AVVkFrame).
+      std::uint64_t last_used;  ///< import_use when last handed to the encoder.
+    };
+
+    static constexpr std::size_t max_cached_imports = 4;  ///< gamescope triple-buffers, plus one spare.
+    std::vector<import_cache_entry_t> import_cache;  ///< Imports reused across frames.
+    std::uint64_t import_use = 0;  ///< Counter for least-recently-used eviction.
 
     // Vulkan device (from FFmpeg)
     struct vk_device_t {
